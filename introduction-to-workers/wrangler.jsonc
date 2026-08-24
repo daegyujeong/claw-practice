@@ -1,47 +1,70 @@
 /**
- * For more details on how to configure Wrangler, refer to:
+ * wrangler.jsonc = 이 워커의 설정 파일
+ * Wrangler(CLI)가 이 파일을 읽어 배포/개발 서버/바인딩을 구성한다.
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
+
+	// 워커 이름. 배포하면 URL에 그대로 들어간다:
+	// https://introduction-to-workers.<계정서브도메인>.workers.dev
 	"name": "introduction-to-workers",
+
+	// 워커의 진입점 파일
 	"main": "src/index.ts",
+
+	// 런타임 동작을 이 날짜 기준으로 고정 (Cloudflare가 런타임을 업데이트해도
+	// 내 워커는 이 날짜의 동작을 유지 → 갑자기 깨지는 것 방지)
 	"compatibility_date": "2026-08-20",
+
+	// 대시보드에서 로그/메트릭 관찰 가능하게
 	"observability": {
 		"enabled": true
 	},
 	"upload_source_maps": true,
+
+	/**
+	 * ★ 바인딩(Binding) = 워커 ↔ Cloudflare 서비스 연결 통로
+	 * - API 키 불필요: "권한 + API가 하나로 합쳐진 것" (키가 코드에 없으니 유출도 불가능)
+	 * - "binding"은 내 코드에서 부를 변수명일 뿐 → env.CLAW_KV
+	 *   (이름은 아무거나 가능. 강의에서는 POTATO로 썼다)
+	 * - "id"는 실제 KV 데이터베이스의 ID (Cloudflare는 이걸로 연결)
+	 * - 추가/변경 후에는 `npm run cf-typegen` 실행 → 타입/자동완성 갱신
+	 */
 	"kv_namespaces": [
 		{
 			"binding": "CLAW_KV",
-			"id": "8ec4e1049e124411bff56239f0402d33"
+			"id": "8ec4e1049e124411bff56239f0402d33",
+			// remote: true → npm run dev(로컬 개발) 중에도 "진짜" 원격 KV에 연결.
+			//   로컬과 배포된 워커가 같은 카운트를 공유하고, 대시보드 KV Pairs에서도 보인다. (강의 방식)
+			// 이 줄을 지우면 → Cloudflare가 내 컴퓨터에서 KV를 에뮬레이션.
+			//   오프라인 개발 가능 + 실서비스 데이터를 건드릴 위험 없음. 코드는 어느 쪽이든 동일.
+			"remote": true
 		}
 	]
+
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
 	 */
 	// "placement": {  "mode": "smart" }
+
 	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
+	 * 그 외 바인딩 종류(25가지+): D1(SQL), R2(파일), Durable Objects, AI,
+	 * Vectorize(벡터DB), Queues, Workflows, Browser Rendering, 환경변수/시크릿 등
+	 * → Nomad Claw의 기능들은 전부 이 바인딩들의 조합으로 만든다.
 	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
 	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
 	// "vars": {  "MY_VARIABLE": "production_value" }
+
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
 	 */
 	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
+
 	/**
-	 * Service Bindings (communicate between multiple Workers)
+	 * Service Bindings (워커 ↔ 워커 통신)
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 	 */
 	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
