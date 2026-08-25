@@ -13,6 +13,11 @@
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
+		const USAGE = `KV Note Store API
+			
+			POST /notes/:key  - 요청 본문을 :key로 저장
+			GET  /notes/:key  - :key의 노트 조회
+			GET  /notes       - 저장된 키 목록 조회`;
 		const url = new URL(request.url);
 
 		if (request.method === 'GET') {
@@ -25,22 +30,16 @@ export default {
 				}
 				else {
 					const notes = await env.NOTE_KV.list();
-					return new Response(JSON.stringify(notes));
+					return new Response(JSON.stringify(notes.keys.map((k) => k.name)));
 				}
 			}
 			else if (url.pathname === '/') {
-				return new Response(`KV Note Store API
-			
-			POST /notes/:key  - 요청 본문을 :key로 저장
-			GET  /notes/:key  - :key의 노트 조회
-			GET  /notes       - 저장된 키 목록 조회`);
+				return new Response(USAGE);
 			}
 			else {
 				return new Response(` Wrong path: ${url.pathname} !!!
 				Correct path:
-				POST /notes/:key  - 요청 본문을 :key로 저장
-				GET  /notes/:key  - :key의 노트 조회
-				GET  /notes       - 저장된 키 목록 조회`);
+					${USAGE}`);
 			}
 		} else if (request.method === 'POST') {
 			console.log(url.pathname);
@@ -58,17 +57,13 @@ export default {
 				else {
 					return new Response(` Wrong path: ${url.pathname} !!!
 					Correct path:
-					POST /notes/:key  - 요청 본문을 :key로 저장
-					GET  /notes/:key  - :key의 노트 조회
-					GET  /notes       - 저장된 키 목록 조회`);
+						${USAGE}`);
 				}
 			}
 			else {
 				return new Response(` Wrong path: ${url.pathname} !!!
 				Correct path:
-				POST /notes/:key  - 요청 본문을 :key로 저장
-				GET  /notes/:key  - :key의 노트 조회
-				GET  /notes       - 저장된 키 목록 조회`);
+				${USAGE}`);
 			}
 		}
 		return new Response("Hello World!");
