@@ -1,34 +1,40 @@
 /**
  * ─────────────────────────────────────────────────────────────
- * 2.2 Using Durable Objects — 첫 Durable Object
+ * 2.3 Durable Object Lifecycle — 상태(RAM)와 생명주기
  * ─────────────────────────────────────────────────────────────
- * 워커(Section 1)는 요청마다 생겼다 사라지는 "함수"라서 아무것도 기억하지 못한다.
- * 그래서 채팅방·멀티플레이어 게임·AI 에이전트처럼
- * "여러 사용자가 같은 서버에 붙어서 실시간으로 상태를 공유"하는 앱은 워커만으로 못 만든다.
+ * DO = "이름당 전 세계에 딱 하나만 존재하는 작은 컴퓨터" (2.2 참고)
  *
- * Durable Object(DO) = "이름당 전 세계에 딱 하나만 존재하는 작은 컴퓨터"
- *   - 어느 지역에서 요청해도 같은 이름이면 같은 객체로 연결된다 (유일하게 지목 가능)
- *   - 자기만의 SQLite 저장소가 붙어 있다 (2.4에서 사용)
- *   - 서버 관리·스케일링은 여전히 Cloudflare가 해준다 (서버리스의 장점 유지)
+ * 이번 챕터의 비유: 클래스 프로퍼티 = 이 컴퓨터의 RAM
+ *   - DO가 살아 있는 동안은 전 세계 누가 접속해도 같은 값을 본다
+ *     (강의에서 VPN으로 영국 IP로 바꿔 접속해도 카운트가 이어짐)
+ *   - 하지만 컴퓨터가 꺼지면(하이버네이션) RAM은 통째로 날아간다
  *
- * 코드 관점에서 DO는 그냥 "클래스"다. 단, 세 가지 규칙:
- *   ① cloudflare:workers의 DurableObject를 extends 한다
- *   ② export default가 아니라 named export (Cloudflare가 클래스 "이름"으로 찾는다)
- *   ③ wrangler.jsonc의 durable_objects.bindings에 class_name으로 등록한다
- *
- * ★ 이 파일과 index.ts가 같은 프로젝트에 있어도 "같은 서버"에서 도는 게 아니다.
- *   워커는 도쿄에서, 이 DO는 파나마에서 실행될 수 있다.
- *   그래서 워커가 DO에게 말을 걸려면 바인딩(env.DP)이라는 통로가 필요하다.
+ * 생명주기:
+ *   getByName 첫 호출 → [생성] → [Active: 요청 처리] → [Idle: 요청 없음]
+ *   → 약 10초 뒤 [Hibernated: 메모리에서 제거] → 다음 요청에 다시 [생성] (RAM은 0부터)
+ *   ※ 언제 꺼질지는 개발자가 통제할 수 없다. "언제든 꺼질 수 있다"고 가정한다.
+ *   ※ 재시작해도 남아야 하는 값은 저장소(2.4의 SQLite)에 둬야 한다.
  */
 import { DurableObject } from 'cloudflare:workers';
 
-// <Env>: 이 DO 안에서도 env(바인딩 모음)를 타입 안전하게 쓰기 위한 제네릭.
-// Env 타입은 `npm run cf-typegen`이 worker-configuration.d.ts에 만들어 준다.
 export class DurablePotato extends DurableObject<Env> {
 	/**
-	 * DO의 메서드 = 바깥(워커)에서 이 컴퓨터를 조작하는 "키보드".
-	 * 워커에서는 `await stub.ping()`으로 부른다.
+	 * ★ RAM: 클래스 프로퍼티.
+	 * DO가 메모리에 살아 있는 동안만 유지되고, 하이버네이션되면 0으로 초기화된다.
+	 * "재시작돼도 상관없는 공유 상태"(예: 현재 접속자 목록)에는 이걸로 충분하다.
 	 */
+	count = 0;
+
+	/**
+	 * 카운터를 1 올리고 현재 값을 돌려준다.
+	 * 워커에서 `await stub.increase()`로 부른다 — async가 아니어도 await가 필요한 이유는
+	 * 이 호출이 DO가 사는 서버로 가는 네트워크 요청(RPC)이기 때문 (2.2 참고).
+	 */
+	increase() {
+		this.count++;
+		return `count is ${this.count}`;
+	}
+
 	ping() {
 		return 'pong';
 	}

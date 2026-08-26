@@ -1,6 +1,6 @@
 /**
  * ─────────────────────────────────────────────────────────────
- * 2.2 Using Durable Objects — 워커에서 DO 호출하기
+ * 2.3 Durable Object Lifecycle — 워커에서 카운터 DO 호출하기
  * ─────────────────────────────────────────────────────────────
  * 역할 분담:
  *   index.ts (워커) : HTTP 요청을 받아서 "어떤 DO에게" 일을 시킬지 정한다 (문지기)
@@ -8,21 +8,24 @@
  */
 
 // Cloudflare가 클래스를 찾을 수 있도록 워커 진입 파일에서 다시 export 한다.
-// wrangler.jsonc의 class_name("DurablePotato")과 이름이 같아야 한다.
 export { DurablePotato } from './do';
 
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
-		// ★ new DurablePotato()는 절대 하지 않는다.
-		//   클래스는 "설계도"일 뿐이고, 인스턴스는 Cloudflare에게 "이름"으로 요청한다.
-		//   - 그 이름의 DO가 있으면 가져오고, 없으면 만들어서 준다
-		//   - 돌려받는 것은 실제 객체가 아니라 stub(스텁): DO에게 요청을 보내는 리모컨
-		//   - 보장: 'default'라는 이름의 DurablePotato는 Cloudflare 전체에 딱 하나
-		const stub = env.DP.getByName('default');
+		// 워커 런타임은 표준 Web API 기반 → URL 객체로 경로를 꺼낸다.
+		const { pathname } = new URL(request.url);
 
-		// ping()은 async가 아닌데 왜 await가 필요할까?
-		// 메서드 호출처럼 보이지만 실제로는 DO가 사는 서버로 가는 "네트워크 요청"(RPC)이다.
-		// 그래서 반환 타입이 string이 아니라 Promise<string>이 된다.
-		return new Response(await stub.ping());
+		// ★ 루트(/)만 카운트하는 이유 (Section 1 KV 카운터와 같은 함정):
+		// 브라우저는 페이지를 열 때 /favicon.ico도 자동으로 요청한다.
+		// 이 체크가 없으면 새로고침 1번에 increase()가 2번 실행돼 카운트가 2씩 오른다.
+		if (pathname === '/') {
+			// 'default'라는 이름의 DO는 Cloudflare 전체에 딱 하나.
+			// 있으면 가져오고 없으면 만든다 (new DurablePotato()는 절대 하지 않는다).
+			const dp = env.DP.getByName('default');
+			return new Response(await dp.increase());
+		}
+
+		// 루트가 아닌 경로(favicon.ico 포함)는 404로 끝낸다.
+		return new Response(null, { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
