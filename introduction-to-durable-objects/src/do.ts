@@ -1,35 +1,58 @@
 /**
  * ─────────────────────────────────────────────────────────────
- * 2.3 Durable Object Lifecycle — 상태(RAM)와 생명주기
+ * 2.4 Durable Object Storage — 내장 SQLite ("하드디스크")
  * ─────────────────────────────────────────────────────────────
- * DO = "이름당 전 세계에 딱 하나만 존재하는 작은 컴퓨터" (2.2 참고)
+ * DO라는 작은 컴퓨터의 구성:
+ *   RAM      : 클래스 프로퍼티 (this.count)   → 하이버네이션되면 날아감 (2.3)
+ *   하드디스크: ctx.storage.sql (SQLite)       → 하이버네이션·재배포에도 남음 (이번 챕터)
+ *   키보드    : 메서드 (increase, ping)        → 워커가 호출
  *
- * 이번 챕터의 비유: 클래스 프로퍼티 = 이 컴퓨터의 RAM
- *   - DO가 살아 있는 동안은 전 세계 누가 접속해도 같은 값을 본다
- *     (강의에서 VPN으로 영국 IP로 바꿔 접속해도 카운트가 이어짐)
- *   - 하지만 컴퓨터가 꺼지면(하이버네이션) RAM은 통째로 날아간다
+ * ctx.storage 안에는 세 가지가 있다:
+ *   - alarm* : 미래의 특정 시각에 DO를 깨우는 알람 (2.7에서 배움)
+ *   - get/put: 이 DO 전용 KV (Section 1 KV와 같은 API) — 지금은 SQL 사용을 권장
+ *   - sql    : 이 DO 전용 SQLite. 객체마다 완전히 격리된 자기만의 DB
  *
- * 생명주기:
- *   getByName 첫 호출 → [생성] → [Active: 요청 처리] → [Idle: 요청 없음]
- *   → 약 10초 뒤 [Hibernated: 메모리에서 제거] → 다음 요청에 다시 [생성] (RAM은 0부터)
- *   ※ 언제 꺼질지는 개발자가 통제할 수 없다. "언제든 꺼질 수 있다"고 가정한다.
- *   ※ 재시작해도 남아야 하는 값은 저장소(2.4의 SQLite)에 둬야 한다.
+ * ★ SQL인데 await가 없다!
+ *   KV는 네트워크 너머에 있어서 `await env.CLAW_KV.get()`처럼 기다려야 했다.
+ *   DO의 SQLite는 DO와 "같은 프로세스" 안에 있어서 sql.exec()가 동기로 즉시 끝난다.
  */
 import { DurableObject } from 'cloudflare:workers';
 
 export class DurablePotato extends DurableObject<Env> {
 	/**
-	 * ★ RAM: 클래스 프로퍼티.
-	 * DO가 메모리에 살아 있는 동안만 유지되고, 하이버네이션되면 0으로 초기화된다.
-	 * "재시작돼도 상관없는 공유 상태"(예: 현재 접속자 목록)에는 이걸로 충분하다.
+	 * @param ctx - DurableObjectState. storage(저장소), id, blockConcurrencyWhile 등이 들어 있다
+	 * @param env - 바인딩 모음 (워커의 env와 같은 것)
+	 *
+	 * ★ constructor는 "한 번"이 아니라 "여러 번" 실행된다.
+	 *   처음 만들어질 때 + 하이버네이션에서 깨어날 때마다 다시 실행된다.
+	 *   반면 SQLite 데이터는 하이버네이션을 살아남는다.
+	 *   → 여기서 실행하는 SQL은 "몇 번 실행돼도 결과가 같도록"(멱등하게) 써야 한다.
+	 */
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+
+		// IF NOT EXISTS가 없으면: 두 번째 깨어날 때 "테이블이 이미 있다"며 에러.
+		// pongs 테이블에 행 하나(id=1)만 두고 그 total 컬럼을 카운터로 쓸 계획.
+		ctx.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS pongs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				total INTEGER
+			);
+		`);
+
+		// OR IGNORE가 없으면: 두 번째 깨어날 때 "id=1이 이미 있다"(PRIMARY KEY 중복) 에러.
+		// 초기값 행(id=1, total=0)을 "없을 때만" 넣는다.
+		ctx.storage.sql.exec(`
+			INSERT OR IGNORE INTO pongs (id, total) VALUES (1, 0);
+		`);
+	}
+
+	/**
+	 * RAM 카운터 — 아직은 프로퍼티에 저장한다.
+	 * 다음 챕터(2.5)에서 이 값을 위의 pongs 테이블(하드디스크)로 옮긴다.
 	 */
 	count = 0;
 
-	/**
-	 * 카운터를 1 올리고 현재 값을 돌려준다.
-	 * 워커에서 `await stub.increase()`로 부른다 — async가 아니어도 await가 필요한 이유는
-	 * 이 호출이 DO가 사는 서버로 가는 네트워크 요청(RPC)이기 때문 (2.2 참고).
-	 */
 	increase() {
 		this.count++;
 		return `count is ${this.count}`;
