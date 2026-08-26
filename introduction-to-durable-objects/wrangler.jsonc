@@ -1,0 +1,75 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "introduction-to-durable-objects",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-25",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+
+	/**
+	 * ★ Durable Object 바인딩 (학습 주석)
+	 * - class_name : src에서 export 한 DO 클래스 이름. 정확히 일치해야 한다.
+	 * - name       : 워커 코드에서 부를 이름 → env.DP
+	 * 바인딩이 필요한 이유: 워커와 DO는 같은 프로젝트에 있어도 다른 서버에서 돈다.
+	 * 이 선언이 있어야 워커가 DO에게 요청을 보낼 통로가 생긴다.
+	 * 선언 후 `npm run cf-typegen`을 돌리면 worker-configuration.d.ts에 DP 타입이 생긴다.
+	 */
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "DurablePotato",
+				"name": "DP"
+			}
+		]
+	},
+
+	/**
+	 * ★ 마이그레이션 (학습 주석)
+	 * "DurablePotato 클래스는 SQLite 저장소를 쓰는 DO다"라고 Cloudflare에 등록하는 것.
+	 * - DO 저장소 백엔드는 옛 KV 방식과 새 SQLite 방식이 있는데, 새 DO는 무조건 SQLite
+	 *   (무료 플랜은 SQLite 방식만 지원). 그래서 new_sqlite_classes.
+	 * - tag는 설정 변경 이력 번호. 나중에 클래스 이름 변경/삭제 시 v2, v3로 올려서 기록한다.
+	 */
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"DurablePotato"
+			]
+		}
+	]
+	/**
+	 * Smart Placement
+	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 */
+	// "placement": {  "mode": "smart" }
+	/**
+	 * Bindings
+	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
+	 * databases, object storage, AI inference, real-time communication and more.
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 */
+	/**
+	 * Environment Variables
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * Note: Use secrets to store sensitive data.
+	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 */
+	// "vars": {  "MY_VARIABLE": "production_value" }
+	/**
+	 * Static Assets
+	 * https://developers.cloudflare.com/workers/static-assets/binding/
+	 */
+	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
+	/**
+	 * Service Bindings (communicate between multiple Workers)
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 */
+	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+}
