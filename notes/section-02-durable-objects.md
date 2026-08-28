@@ -1,6 +1,6 @@
 # Cloudflare Agents 강의 학습 정리 — Section 2: Durable Objects (입문자용)
 
-> Nomad Coders 「Cloudflare Agents」 강의 Section 2(Durable Objects) 앞부분(2.2 ~ 2.5 + 저장소 격리 데모)을 정리한 학습 노트다.
+> Nomad Coders 「Cloudflare Agents」 강의 Section 2(Durable Objects, 2.2 ~ 2.12)를 정리한 학습 노트다.
 > 📘 표시가 붙은 부분은 **Cloudflare 공식 문서(developers.cloudflare.com)** 를 참조해 강의에 없던 사실을 보강한 것이다.
 
 ---
@@ -12,10 +12,16 @@
 2.3 Durable Object Lifecycle  : getByName으로 DO 얻기, 메서드 호출, 생명주기와 "RAM"
 2.4 Durable Object Storage    : 내장 SQLite("하드디스크"), constructor는 여러 번 실행된다
 2.5 Concurrency               : 카운터를 RAM → SQL로 이동, 파라미터 쿼리, 단일 스레드
-  + 저장소 격리 데모           : 닉네임별로 DO를 따로 만들어 저장소가 격리됨을 증명
+2.6 저장소 격리 데모           : 닉네임별로 DO를 따로 만들어 저장소가 격리됨을 증명
+2.7 Alarms                    : 단일 스레드의 조건, RETURNING, 정해진 시각에 alarm() 호출
+2.8 WebSockets                : HTTP vs WebSocket, 워커는 문지기 — 요청을 통째로 DO의 fetch()에
+2.9 Upgrades                  : WebSocketPair, acceptWebSocket, 101 응답, 잠들어도 연결 유지
+2.10 Messages                 : serializeAttachment로 닉네임, broadcast로 채팅방 완성
+2.11 Recap                    : 한도, "Agent = 배관이 깔린 DO"
+2.12 Templates                : 섹션별 시작 템플릿 안내
 ```
 
-Section 1의 결론은 "워커는 무상태(stateless)라 기억을 못 하니 KV에 밖에 둔다"였다. Section 2는 거기서 한 걸음 더 나가 **"그래도 안 되는 앱이 있다 → 그래서 상태를 자기 안에 갖는 Durable Objects가 있다"** 는 이야기다. 최종 목표인 AI 에이전트(Nomad Claw)가 바로 이 Durable Objects 위에 만들어진다.
+Section 1의 결론은 "워커는 무상태(stateless)라 기억을 못 하니 KV에 밖에 둔다"였다. Section 2는 거기서 한 걸음 더 나가 **"그래도 안 되는 앱이 있다 → 그래서 상태를 자기 안에 갖는 Durable Objects가 있다"** 는 이야기다. 최종 목표인 AI 에이전트(Nomad Claw)가 바로 이 Durable Objects 위에 만들어진다. 후반부(2.7~)는 DO만이 할 수 있는 두 가지 — **스스로 깨어나기(알람)** 와 **연결 붙들기(WebSocket)** — 로 채팅방을 완성한다.
 
 ---
 
@@ -280,7 +286,7 @@ constructor는 `async`일 수 없으니, 초기화에 `await`가 필요하면 �
 
 ---
 
-## 7. 실습 코드 뜯어보기 ⑤ — 이름마다 저장소가 완전히 따로 논다 (저장소 격리 데모)
+## 7. 실습 코드 뜯어보기 ⑤ — 이름마다 저장소가 완전히 따로 논다 (2.6 저장소 격리 데모)
 
 ### `src/index.ts` 최종 형태
 ```ts
@@ -311,41 +317,327 @@ Workers & Pages → 배포한 워커 → Bindings에 DO가 보이고, **Data Stu
 
 ---
 
-## 8. 실습 프로젝트(`introduction-to-durable-objects`) 정리 메모
+## 8. 실습 코드 뜯어보기 ⑥ — 알람: DO가 스스로 깨어난다 (2.7)
+
+### 먼저 바로잡기 — "단일 스레드"의 정확한 범위
+2.5에서 "DO는 한 번에 한 요청만 처리한다"고 배웠다. 2.7의 첫 부분은 그 말의 조건을 분명히 한다. **저장소(자기 SQLite) 안에서만 일하는 동안**은 사용자 A의 `increase()`가 끝날 때까지 B는 기다린다. 그런데 메서드 안에서 `await fetch('https://...')`처럼 **외부 자원을 기다리는 순간 그 잠금이 풀린다.** 그 사이에 B의 `increase()`가 시작될 수 있고, 같은 메서드 두 개가 동시에 도는 상황이 된다. "읽기 → `await fetch` → 쓰기" 구조를 만들면 KV 카운터에서 봤던 레이스가 그대로 돌아온다. (6절의 📘 블록이 바로 이 이야기다.)
+
+### `RETURNING` — 읽기와 쓰기를 한 문장으로
+```ts
+// 2.5 버전: 두 단계 (읽고 → 쓰고)
+const { total } = this.sql.exec(`SELECT total FROM pongs LIMIT 1`).one() as { total: number };
+this.sql.exec(`UPDATE pongs SET total = ? WHERE id = 1`, total + 1);
+
+// 2.7 버전: 한 문장 (올리고 → 올린 값을 바로 돌려받기)
+const { total } = this.sql
+	.exec('UPDATE pongs SET total = total + 1 WHERE id = 1 RETURNING total;')
+	.one() as { total: number };
+```
+`RETURNING`은 SQLite 문법이다. `UPDATE`가 끝난 뒤의 값을 `SELECT`처럼 돌려주니, "읽기와 쓰기 사이"라는 틈 자체가 문법적으로 사라진다. 위에서 말한 외부 `await` 문제를 애초에 만들지 않는 가장 간단한 습관이다. `.one()`은 2.5와 같다 — 결과 커서에서 유일한 한 행을 객체로 꺼낸다.
+
+### 알람이란
+DO에게 **"이 시각에 나를 깨워서 `alarm()`을 실행해 줘"** 라고 예약하는 기능이다. 10초 뒤도 되고 1년 뒤도 된다. 예약해 두고 DO가 하이버네이션돼도 상관없다. 시각이 되면 Cloudflare가 DO를 깨워 `alarm()`을 호출한다. 개발자가 살려 둘 필요가 없다. 강의의 예시: 사용자가 가입하면 DO를 만들고 **일주일 뒤 알람**을 걸어 둔다 → 잊어버린다 → 일주일 뒤 `alarm()`에서 후속 이메일을 보낸다.
+
+규칙은 두 가지다. **① DO 하나에 알람은 동시에 하나만**, **② 알람은 `alarm()` 메서드를 호출한다.**
+
+### 완성된 `src/do.ts`
+```ts
+export class DurablePotato extends DurableObject<Env> {
+	sql: SqlStorage;
+	constructor(ctx: DurableObjectState, env: Env) { /* 2.4와 같음 */ }
+
+	async increase() {
+		const { total } = this.sql
+			.exec('UPDATE pongs SET total = total + 1 WHERE id = 1 RETURNING total;')
+			.one() as { total: number };
+
+		if (total >= 30) {
+			const currentAlarm = await this.ctx.storage.getAlarm();   // 예약된 시각(ms) 또는 null
+			if (currentAlarm === null) {
+				this.ctx.storage.setAlarm(Date.now() + 10_000);          // 10초 뒤
+			}
+		}
+		return `count is ${total}`;
+	}
+
+	alarm() {
+		this.sql.exec('UPDATE pongs SET total = 0 WHERE id = 1');
+		// 알람이 여러 개 필요하면: alarms 테이블에서 다음 알람을 찾아 setAlarm()
+	}
+}
+```
+흐름: 카운터가 30에 닿으면 → 이미 걸린 알람이 있는지 확인(`getAlarm`) → 없으면 10초 뒤로 예약(`setAlarm`) → 10초 뒤 Cloudflare가 `alarm()`을 호출 → 카운터를 0으로. 알람은 한 번 울리면 해제되므로, 다시 30을 넘기면 새로 예약된다. `getAlarm`을 먼저 확인하는 이유는 규칙 ① 때문이다 — `setAlarm`은 기존 알람을 **덮어쓰므로**, 확인 없이 매번 부르면 30, 31, 32… 요청마다 알람이 10초씩 뒤로 밀려 영영 안 울릴 수 있다.
+
+### 실습 중 겪은 함정 — `getAlarm()`에 `await`가 빠지면
+```ts
+const currentAlarm = this.ctx.storage.getAlarm();   // ❌ Promise 객체가 담긴다
+if (currentAlarm === null) { ... }                  //    Promise는 null이 아니므로 항상 false
+```
+`sql.exec()`가 동기라서 `ctx.storage`의 다른 메서드도 동기일 거라고 생각하기 쉽지만, **`sql.exec()`만 예외**다. `get/put/getAlarm/setAlarm/deleteAlarm`은 모두 Promise를 돌려준다. `await`를 빼먹으면 비교가 항상 거짓이 되어 알람이 절대 예약되지 않는다. 증상은 "`console.log`는 찍히는데 `alarm()`은 안 불린다"이다. 브라우저 콘솔에서 `Promise.resolve(null) === null`을 쳐 보면 `false`가 나온다.
+
+그렇다면 `setAlarm`은 왜 `await` 없이도 되는가? 돌려주는 값을 쓰지 않으니 흐름이 깨지진 않고, 아래 📘의 출력 게이트 덕분에 응답이 나가기 전에 예약이 확정된다. 다만 `await`가 없으면 예약 실패가 조용히 묻히므로(unhandled rejection) 붙여 두는 편이 안전하다.
+
+### 알람이 여러 개 필요하면 — SQL에 목록을 두고 "다음 알람"을 이어 건다
+```
+alarms 테이블: name | when(시각) | fired(울렸는지)
+  "내일"      2026-08-28 09:00   false
+  "모레"      2026-08-29 09:00   false
+
+setAlarm(내일)  →  alarm() 실행: 내일 일 처리, fired=true
+                   → 테이블에서 아직 안 울린 가장 빠른 알람(모레)을 찾아 setAlarm(모레)
+                   → 모레 alarm(): 처리 후 남은 게 없으면 끝
+```
+DO에는 자기 데이터베이스가 있으니 "예약 목록"은 거기에 두고, **알람이 울릴 때마다 다음 알람을 하나 거는** 방식으로 체인을 만든다. Section 3의 Agents SDK는 이 패턴을 이미 구현해 두어서 알람을 여러 개 걸 수 있다(`schedule()`).
+
+### 실패와 재시도
+`alarm()` 안에서 **잡히지 않은 예외**가 나면 실패로 간주되어 Cloudflare가 다시 호출한다. 핸들러는 `alarm(info)`로 `{ retryCount, isRetry }`를 받으므로 "이게 몇 번째 재시도인지"를 알 수 있다. `try/catch`로 삼킨 예외는 실패가 아니다.
+
+> 📘 **공식 문서 보강 — 알람 API의 정확한 동작**
+> - `getAlarm()` → `Promise<number | null>` (UNIX epoch 기준 ms). `alarm()` 실행 중에 부르면 `null`이다(이미 소비된 알람이므로).
+> - `setAlarm(ms | Date)` → 기존 알람을 **덮어쓴다.** 현재 시각이나 과거를 넣으면 "즉시"에 가깝게 비동기로 실행된다. constructor 안에서 `setAlarm`을 부르면 깨어날 때마다 다음 알람을 덮어써 버리므로 피한다.
+> - `deleteAlarm()` → 예약 취소. 이미 실행 중인 `alarm()`은 멈추지 않는다.
+> - 실행 보장은 **at-least-once**(최소 한 번). 실패 시 **최대 6회 재시도**, 첫 실패 후 **2초부터 지수 백오프**(2, 4, 8…초). 한 DO에서 `alarm()`은 동시에 하나만 실행된다.
+> - 알람은 저장소에 기록되므로 하이버네이션·퇴출·재배포를 넘어 유지된다.
+> - `alarm()`의 실행 시간(wall time) 한도는 **15분**이다(HTTP/RPC 요청은 무제한).
+> - **출력 게이트(output gate)**: DO는 저장소 쓰기(`put`, `setAlarm`, SQL 쓰기)가 디스크에 확정되기 전까지 바깥으로 응답을 내보내지 않는다. 그래서 `setAlarm`에 `await`를 안 붙여도 응답이 나갈 땐 예약이 끝나 있다. `allowUnconfirmed: true` 옵션으로 이 대기를 끌 수 있지만 기본은 켜 두는 것이 안전하다.
+> - `alarm()`은 `async`로 선언하는 것이 관례다 — 플랫폼이 반환된 Promise를 기다렸다가 거부되면 재시도해 준다.
+
+---
+
+## 9. 실습 코드 뜯어보기 ⑦ — 요청을 통째로 DO에게 넘기기 (2.8)
+
+### 여기서부터 DO가 진짜 빛난다
+지금까지 한 것(카운터, SQLite)은 사실 워커 + KV로도 흉내 낼 수 있다. 알람은 DO만의 것이지만, DO가 **가장 많이 쓰이는 이유는 실시간**이다. 채팅방, 멀티플레이어 게임, 협업 도구, 그리고 "에이전트가 먼저 말을 거는" 기능은 모두 서버가 클라이언트와의 연결을 붙들고 있어야 한다. 그 도구가 WebSocket이다.
+
+### HTTP와 WebSocket
+| | HTTP | WebSocket |
+|---|---|---|
+| 연결 | 요청 → 응답 → **끊김** | 한 번 열면 누가 닫을 때까지 **유지** |
+| 방향 | 클라이언트가 물어야 서버가 답함 | **양방향** — 서버가 먼저 보낼 수 있음 |
+| 상태 | 무상태 (그래서 쿠키·세션이 필요) | 연결 자체가 상태 |
+| 시작 | — | **HTTP 요청에 `Upgrade` 헤더**를 실어 보내면서 시작 |
+
+WebSocket도 처음엔 HTTP 요청이다. 브라우저가 `Upgrade: websocket` 헤더를 붙여 보내면, 서버는 "이 사람은 WebSocket으로 갈아타고 싶구나"를 알고 연결을 승격(upgrade)한다.
+
+### 구조가 바뀐다 — 워커는 "문지기", DO가 직접 응답
+```
+[2.2 ~ 2.7]  브라우저 → 워커 ──(dp.increase() 호출)──▶ DO
+             브라우저 ◀── 워커가 new Response(...)로 응답  (DO는 HTTP를 모름)
+
+[2.8 ~]      브라우저 → 워커 ──(dp.fetch(request) — 요청 통째로 전달)──▶ DO
+             브라우저 ◀────────────── DO가 만든 Response가 그대로 전달 ──┘
+```
+워커는 요청이 오면 응답하고 **죽는다**. 그러니 워커 안에서 WebSocket을 열어 봤자 곧 끊긴다. 연결을 붙들고 있을 수 있는 건 살아 있고, 이름으로 지목되고, 여러 사람이 같은 것에 붙을 수 있는 DO다. 그래서 워커는 `Upgrade` 헤더가 있는지만 보고 **요청을 통째로** DO에게 넘긴다(문지기). DO가 그 요청으로 연결을 열고 직접 응답한다.
+
+### `src/index.ts` / `src/do.ts`
+```ts
+// index.ts — 워커
+const { pathname, searchParams } = new URL(request.url);
+const roomId = searchParams.get('roomId') ?? 'public';   // 닉네임 대신 "방 이름"이 DO 이름
+const upgrade = request.headers.get('Upgrade');
+if (upgrade) {
+	const dp = env.DP.getByName(roomId);
+	return dp.fetch(request);                               // 요청을 넘기고, DO의 응답을 그대로 반환
+}
+return new Response(null, { status: 404 });
+
+// do.ts — DO. 이전의 constructor / increase / alarm은 모두 삭제
+export class DurablePotato extends DurableObject<Env> {
+	fetch(request: Request) {
+		return new Response('hello');
+	}
+}
+```
+DO의 `fetch(request)`는 **특별한 메서드**다. 2.3에서 배운 RPC 메서드(`increase`)는 워커가 값을 받아 자기가 응답을 만들었지만, `fetch`는 DO가 HTTP 요청을 받아 HTTP 응답을 돌려주는 "작은 HTTP 서버" 역할이다. 워커 쪽에서 `dp.fetch(request)`를 부르면 그 응답이 곧 사용자에게 가는 응답이 된다. DO 이름이 `roomId`가 되었다는 점도 중요하다 — **방 하나 = DO 하나**, 같은 방에 들어온 사람들은 같은 DO에 붙는다.
+
+> 📘 **공식 문서 보강 — `fetch()` vs RPC 메서드**
+> - `fetch(request: Request): Response | Promise<Response>`는 DO가 HTTP 서버처럼 동작하게 하는 핸들러다. 모든 핸들러(`fetch`, `alarm`, `webSocket*`)는 선택 사항이며 `async`여도 된다.
+> - 공식 권장: **HTTP 요청/응답 흐름이 아닌 일은 RPC 메서드로**(compatibility date 2024-04-03 이후). WebSocket 승격처럼 "요청 객체 자체"가 필요할 때 `fetch`를 쓴다.
+> - 워커에서 `Upgrade` 헤더를 검사할 때 공식 예제는 값이 정확히 `websocket`인지 확인하고, 아니면 **426 Upgrade Required**를 돌려준다. 강의는 존재 여부만 봤다.
+
+---
+
+## 10. 실습 코드 뜯어보기 ⑧ — WebSocket 열기 (2.9)
+
+### `WebSocketPair` — 실 전화기의 양쪽 끝
+```ts
+export class DurablePotato extends DurableObject<Env> {
+	fetch(request: Request) {
+		const url = new URL(request.url);
+		const nickname = url.searchParams.get('nickname') ?? 'anon';
+
+		const webSocketPair = new WebSocketPair();                 // 양쪽 끝 두 개가 생긴다
+		const [client, server] = Object.values(webSocketPair);
+
+		this.ctx.acceptWebSocket(server);                          // server 끝은 DO가 보관
+
+		return new Response(null, { status: 101, webSocket: client });   // client 끝은 브라우저에게
+	}
+
+	webSocketMessage(ws: WebSocket, message: string) { console.log(message); }
+	webSocketClose(ws: WebSocket) { console.log('someone left'); }
+}
+```
+`new WebSocketPair()`는 **서로 연결된 소켓 두 개**를 만든다. 하나(`client`)는 `101 Switching Protocols` 응답에 실어 브라우저에 주고, 다른 하나(`server`)는 `this.ctx.acceptWebSocket()`으로 DO의 메모리에 보관한다. 이제 브라우저가 `client`에 말하면 DO의 `server`에서 들리고, 반대도 된다. 워커가 아니라 DO여야 하는 이유가 바로 이 `server` 끝을 **계속 들고 있어야** 하기 때문이다.
+
+`acceptWebSocket`을 부르는 순간 DO 클래스에 숨어 있던 메서드 세 개가 활성화된다. 오버라이드만 하면 되고 따로 연결할 게 없다.
+
+| 메서드 | 언제 불리나 |
+|---|---|
+| `webSocketMessage(ws, message)` | 클라이언트가 메시지를 보냈을 때 |
+| `webSocketClose(ws, code, reason, wasClean)` | 클라이언트가 나갔을 때 |
+| `webSocketError(ws, error)` | 연결 끊김이 아닌 오류가 났을 때 |
+
+워커 쪽은 `/ws` 경로에서만 승격을 받도록 정리됐다(`if (pathname === '/ws')` 안에 `Upgrade` 검사).
+
+### 터미널에서 붙어 보기
+```bash
+brew install websocat
+websocat "ws://localhost:8787/ws?roomId=private&nickname=nico"
+# 연결되면 프롬프트가 안 끝난다 = 연결 유지 중. 타이핑 → Enter → 서버 콘솔에 찍힘
+```
+`npm run dev` 콘솔에 `GET /ws 101 Switching Protocols`가 찍히면 승격 성공이다. 브라우저 콘솔에서도 한 줄로 확인할 수 있다: `const s = new WebSocket('ws://localhost:8787/ws?nickname=me'); s.onopen = () => s.send('hello')`.
+
+### 하이버네이션되면 연결이 끊기지 않나?
+DO는 여전히 조용해지면 잠든다(2.3에서 배운 대로). 그런데 WebSocket 연결은 사실 **DO가 아니라 항상 켜져 있는 Cloudflare 네트워크에** 붙어 있고, Cloudflare가 그것을 내부적으로 DO에 이어 준다.
+
+```
+브라우저 ══ WebSocket ══ Cloudflare 네트워크(항상 켜짐) ──내부 전달──▶ DO (잠들 수 있음)
+```
+그래서 채팅방에 아무 말이 없으면 DO는 잠들지만 연결은 살아 있고, 누군가 메시지를 보내면 Cloudflare가 DO를 깨워 `webSocketMessage`를 호출한다. 조용한 방 수천 개가 열려 있어도 컴퓨팅 비용이 거의 들지 않는다.
+
+> 📘 **공식 문서 보강 — WebSocket Hibernation API**
+> - 이것이 되는 건 **`ctx.acceptWebSocket(server)`를 썼기 때문**이다. 표준 방식인 `server.accept()` + `addEventListener('message')`를 쓰면 DO가 연결을 자기 메모리에서 직접 들고 있어야 해서 **하이버네이션이 불가능**하고, 연결이 있는 내내 요금(GB-s)이 붙는다. 강의 방식(Hibernation API)은 잠든 동안 요금이 붙지 않는다.
+> - 잠들었다 깨면 **메모리는 초기화되고 constructor가 다시 실행**된다. 연결마다 붙여 둔 정보가 필요하면 다음 절의 `serializeAttachment`를 써야 한다.
+> - `acceptWebSocket(ws, tags?)`로 태그를 붙이고 `getWebSockets(tag?)`로 골라낼 수 있다(예: 같은 사용자의 여러 탭).
+> - ping/pong 같은 제어 프레임은 런타임이 자동 처리하고 `webSocketMessage`에 오지 않으며 하이버네이션을 깨우지 않는다. compatibility date 2026-04-07 이후에는 Close 프레임 응답도 자동이다.
+> - `setTimeout`/`setInterval`, 진행 중인 알람·요청이 있으면 잠들지 못한다. **DO가 클라이언트로 여는** 바깥 방향 WebSocket은 하이버네이션되지 않고 최대 15분까지 DO를 깨워 둔다.
+> - **재배포하면 모든 DO가 재시작되어 WebSocket이 전부 끊긴다.** 개발 중 파일을 저장해도 같은 일이 일어난다(강의에서 저장할 때마다 websocat이 끊긴 이유). 클라이언트는 재접속 로직을 가져야 한다.
+> - 받는 메시지 크기 한도 **32 MiB**. 여러 작은 메시지보다 50~100ms 단위로 묶어 보내는 편이 효율적이다.
+
+---
+
+## 11. 실습 코드 뜯어보기 ⑨ — 닉네임과 브로드캐스트 (2.10)
+
+### 연결에 데이터 붙이기 — `serializeAttachment`
+```ts
+this.ctx.acceptWebSocket(server);
+server.serializeAttachment({ nickname });          // 이 연결에 작은 데이터를 붙인다
+
+webSocketMessage(ws: WebSocket, message: string) {
+	const { nickname } = ws.deserializeAttachment() as { nickname: string };   // 꺼낸다
+	...
+}
+```
+URL로 받은 닉네임을 매번 다시 파싱하지 않고 **연결 자체에 붙여 둔다.** 이후 `webSocketMessage`·`webSocketClose`에서 Cloudflare가 넘겨주는 `ws`에서 `deserializeAttachment()`로 꺼내면 "누가 말했는지"를 안다. 사용자 ID, 방 안 역할 같은 것을 넣는 자리다.
+
+### 보낸 사람에게 답하기 — `ws.send()`
+핸들러가 받는 `ws`는 지금 메시지를 보낸 바로 그 연결이다. `ws.send('hello, ' + nickname)`이면 그 사람에게만 답이 간다.
+
+### 모두에게 뿌리기 — `broadcast`
+클라이언트끼리는 서로 연결돼 있지 않다(P2P가 아니다). 전원이 같은 DO(서버)에 붙어 있으므로, **서버가 받은 메시지를 나머지 전원에게 전달**해야 채팅이 된다.
+
+```ts
+broadcast(message: string, exclude?: WebSocket) {
+	for (const socket of this.ctx.getWebSockets()) {     // 이 DO에 붙은 모든 연결
+		if (socket !== exclude) {
+			socket.send(message);
+		}
+	}
+}
+
+webSocketMessage(ws: WebSocket, message: string) {
+	const { nickname } = ws.deserializeAttachment() as { nickname: string };
+	this.broadcast(`${nickname} said: ${message}`, ws);   // 보낸 본인은 제외
+}
+
+webSocketClose(ws: WebSocket) {
+	const { nickname } = ws.deserializeAttachment() as { nickname: string };
+	this.broadcast(`${nickname} has left the building.`);  // 나간 사람은 이미 없으니 제외 불필요
+}
+```
+`this.ctx.getWebSockets()`가 **이 DO(= 이 방)에 붙어 있는 연결 전부**를 준다. 처음 버전은 보낸 사람에게도 자기 메시지가 되돌아가는 버그가 있었고, `exclude` 인자로 그 연결 하나를 건너뛰게 해서 고쳤다. 방 이름(`roomId`)이 DO 이름이므로 `private` 방의 브로드캐스트는 `public` 방에 절대 새지 않는다 — 2.6의 저장소 격리가 연결 격리로도 이어진 것이다.
+
+nico와 lin이 `private` 방에 각각 websocat으로 붙어서: nico가 "hi" → lin에게만 `nico said: hi`, lin이 나가면 → nico에게 `lin has left the building.` 채팅방 완성이다.
+
+> 📘 **공식 문서 보강 — attachment의 한계**
+> - `serializeAttachment(value)`의 값은 구조적 복제(structured clone)가 가능한 것이어야 하고, 직렬화 크기 **최대 16,384바이트(16 KiB)** 다. "작은 식별 정보"용이지 데이터 저장소가 아니다. 큰 것은 SQLite에 두고 attachment에는 키만 넣는다.
+> - 값을 바꾸면 다시 `serializeAttachment`를 불러야 반영된다(참조가 아니라 복사본).
+> - 연결이 건강한 동안 **하이버네이션을 넘어 유지**되고, 어느 쪽이든 연결을 닫으면 사라진다.
+> - `webSocketMessage`의 `message`는 텍스트면 `string`, 바이너리면 `ArrayBuffer`다.
+
+---
+
+## 12. 섹션 마무리와 한도 (2.11), 섹션별 템플릿 안내 (2.12)
+
+### 이 섹션이 곧 에이전트의 뼈대다
+Section 3부터 쓰는 **Agent 클래스는 "배관이 미리 깔린 DO"** 다. 지금까지 손으로 한 일이 그대로 메서드로 들어 있다.
+
+| 이번 섹션에서 직접 만든 것 | Agents SDK에서는 |
+|---|---|
+| `CREATE TABLE messages …` | `messages` 테이블이 이미 있음 |
+| `broadcast()` 직접 구현 | `this.broadcast()` 내장 |
+| `WebSocketPair` + `acceptWebSocket` + 핸들러 | 실시간 연결이 기본 제공 |
+| 알람 하나 + SQL로 다음 알람 체인 | `schedule()`로 여러 개 예약 |
+| `getByName(roomId)` | 사용자/대화별 에이전트 인스턴스 |
+
+사용자마다 에이전트를 하나씩 줘도 된다 — 객체 수가 무제한이기 때문이다.
+
+### 한도
+| 항목 | 한도 |
+|---|---|
+| 객체 수 (계정/클래스당) | **무제한** |
+| DO 클래스 수 (`wrangler.jsonc`의 class_name) | 계정당 **500**(유료) / 100(무료), 요청 시 상향 가능 |
+| 저장소 — 계정당 | 무제한(유료) / 5 GB(무료) |
+| 저장소 — 클래스당 | 무제한 |
+| 저장소 — **객체 하나당** | **10 GB** |
+| 받는 WebSocket 메시지 | 32 MiB |
+
+> 📘 **공식 문서 보강 — SQL 세부 한도와 성능 기준**
+> - 테이블당 컬럼 100개, 행/문자열/BLOB 하나 2 MB, SQL 문 길이 100 KB, 바인딩 파라미터(`?`) 쿼리당 100개, `LIKE`/`GLOB` 패턴 50바이트.
+> - 요청당 CPU 시간 기본 30초(설정으로 5분까지). 동시 바깥 연결(fetch 등) 요청당 6개.
+> - 객체 하나당 초당 약 **1,000 요청이 소프트 한도**다. 넘으면 "overloaded" 오류가 난다. 인기 있는 방 하나에 모두가 몰리면 DO 하나로는 감당이 안 되므로, 방을 쪼개거나(샤딩) 이름 설계를 다시 하는 것이 해법이다.
+
+### 2.12 — 섹션마다 시작 템플릿이 제공된다
+각 섹션의 **소개 영상 위에 명령어**가 하나 붙어 있다. 그걸 실행하면 그 섹션의 시작 시점과 같은 폴더(보일러플레이트 삭제, 기본 설정 완료)가 만들어진다. 영상 안에서 "CSS 지워라, 이 코드 복사해라, 위 링크에서 코드 받아라"라고 해도 **따르지 않아도 된다** — 템플릿이 그 상태를 이미 담고 있다. 강사 저장소의 `templates/` 폴더가 그 원본이다.
+
+---
+
+## 13. 실습 프로젝트(`introduction-to-durable-objects`) 정리 메모
 
 강의 순서대로 2.2 → 2.3 → 2.4 → 2.5 네 단계로 나눠 학습 주석과 함께 커밋했다. 각 커밋은 `npx tsc --noEmit`과 `npx vitest run`을 통과한 상태다.
 
 - 처음 작성했던 코드에서 `getByName('defualt')`(오타)와 만들어 두고 쓰지 않던 `nickname` 변수를 `getByName(nickname)`으로 연결해 격리 데모가 재현되도록 고쳤다. 오타 상태로도 "그 이름의 DO 하나"가 생겨 동작은 하지만, 배포 후 Data Studio에서 `defualt`라는 이름으로 찾아야 하는 함정이 있었다.
 - 강의 코드는 `/` 외의 경로를 전부 404로 보내지만, 2.2에서 만든 `ping()`을 `/ping` 경로로 남겨 두어 DO 연결 확인용으로 쓸 수 있게 했다.
 - 테스트는 `SELF.fetch`(워커 → 바인딩 → DO까지 통합)와 `runInDurableObject`(DO 안에 들어가 SQLite 값을 직접 확인)를 함께 쓴다. 동시 요청 10개를 보내도 증가가 유실되지 않는 테스트로 단일 스레드 보장을 직접 확인했다.
+- 2.7 알람 실습에서는 `getAlarm()`에 `await`를 빠뜨려 알람이 걸리지 않는 문제를 겪었다(8절). 2.8부터는 카운터 코드를 지우고 채팅방으로 바꾸므로, 2.7 상태를 커밋으로 남겨 두면 나중에 알람 예제를 다시 볼 수 있다.
+- 2.8 ~ 2.10은 `fetch` 전달 → `WebSocketPair` 승격 → attachment/broadcast 순으로 커밋을 나눈다. WebSocket은 `SELF.fetch`에 `Upgrade: websocket` 헤더를 붙여 101이 오는지, `runInDurableObject`로 `getWebSockets().length`가 늘어나는지로 테스트한다.
 
 ---
 
-## 9. 핵심 요약
+## 14. 핵심 요약
 
 1. **워커는 "누가 같은 서버에 붙는지"를 고를 수 없어서** 채팅·게임·실시간 협업·에이전트를 못 만든다. 상태 있는 서버는 (a) 유일하게 지목 가능하고 (b) 연결 동안 살아 있어야 한다.
-2. **Durable Object = 이름당 전 세계에 하나뿐인 작은 컴퓨터.** RAM(클래스 프로퍼티) + 하드디스크(내장 SQLite) + 키보드(메서드)를 갖는다.
-3. **직접 `new` 하지 않는다.** `env.DP.getByName('이름')`으로 Cloudflare에 요청하면 있으면 주고 없으면 만든다. 메서드 호출은 사실 네트워크 요청이라 `await`가 필요하다.
-4. **요청이 10초쯤 없으면 하이버네이션**되어 RAM(프로퍼티)이 날아가고, 깨어날 때 **constructor가 다시 실행**된다. 📘 (완전 퇴출은 70~140초, WebSocket은 연결 유지)
-5. **SQLite는 같은 프로세스에 있어 `await` 없이 동기로 쓴다.** constructor의 스키마 코드는 `CREATE TABLE IF NOT EXISTS`, `INSERT OR IGNORE`로 여러 번 실행돼도 안전하게 쓴다.
-6. **값은 `?` 파라미터로 넘긴다** (SQL 인젝션 방지). 읽을 때는 `.one()`(정확히 1행 아니면 예외 📘).
-7. **DO는 한 번에 한 요청만 처리**하므로 읽기→쓰기 사이 레이스가 없다. 단, 그 사이에 외부 `await`(fetch 등)를 넣으면 끼어들 수 있다 📘. constructor에서 `await`가 필요하면 `blockConcurrencyWhile`.
-8. **이름마다 저장소가 완전히 격리**된다. 사용자별·방별·대화별 서버를 이름만 바꿔 무한히 만들 수 있고, 대시보드 Data Studio에서 객체 하나의 SQLite를 들여다볼 수 있다.
-9. **AI 에이전트(Agents SDK)는 이 Durable Objects 위에 만들어진다.** 대화별 메모리·스케줄·실시간 연결이 전부 여기서 나온다.
-
-> 📘 **참고 — 알아두면 좋은 한도**
-> SQLite 저장소는 **객체당 10 GB**, 계정 전체는 무료 5 GB / 유료 무제한. 객체 수는 무제한. 객체 하나당 초당 약 1,000 요청(소프트 한도). 요청당 CPU 시간 기본 30초. 무료 플랜은 SQLite 방식 DO만 가능.
+2. **Durable Object = 이름당 전 세계에 하나뿐인 작은 컴퓨터.** RAM(클래스 프로퍼티) + 하드디스크(내장 SQLite) + 키보드(메서드)를 갖는다. `new` 하지 않고 `env.DP.getByName('이름')`으로 얻는다.
+3. **요청이 10초쯤 없으면 하이버네이션**되어 RAM이 날아가고, 깨어날 때 **constructor가 다시 실행**된다. 그래서 스키마 코드는 `IF NOT EXISTS` / `OR IGNORE`로 멱등하게 쓴다.
+4. **SQLite는 같은 프로세스라 `sql.exec()`만 동기**다. `ctx.storage`의 나머지(`get/put/getAlarm/setAlarm`)는 Promise → `await` 필수 📘. 값은 `?` 파라미터로, 읽기+쓰기는 `RETURNING`으로 한 문장에.
+5. **DO는 한 번에 한 요청만 처리**하지만, 메서드 안에서 외부 `await`(fetch 등)를 만나면 잠금이 풀려 다른 요청이 끼어든다. 저장소 읽기·쓰기 사이에 외부 `await`를 두지 말 것.
+6. **알람은 DO당 하나.** `getAlarm()`으로 확인 → `setAlarm(ms)`로 예약 → 시각이 되면 `alarm()` 호출. 하이버네이션을 넘어 유지되고, 실패하면 최대 6회 지수 백오프 재시도(at-least-once) 📘. 여러 개가 필요하면 SQL에 목록을 두고 다음 알람을 이어 건다.
+7. **WebSocket = `Upgrade` 헤더로 시작하는 양방향 상시 연결.** 워커는 문지기로서 요청을 `dp.fetch(request)`로 통째로 넘기고, DO가 `WebSocketPair`를 만들어 `client`는 101 응답에, `server`는 `ctx.acceptWebSocket()`에 준다.
+8. **Hibernation API 덕분에 DO가 잠들어도 연결은 Cloudflare가 붙들고 있다** — 메시지가 오면 깨운다. 잠든 동안 요금이 없다 📘. 연결별 정보는 `serializeAttachment`(16 KiB 한도 📘)에, 전체 전송은 `getWebSockets()` 순회(`broadcast`)로.
+9. **한도**: 객체 수 무제한, 객체당 SQLite 10 GB, 클래스 500개, 객체당 약 1,000 req/s(소프트) 📘. 재배포하면 모든 WebSocket이 끊긴다 📘.
+10. **Agent 클래스는 이 모든 배관이 깔린 DO다.** messages 테이블, broadcast, 실시간 연결, 다중 스케줄이 기본 제공된다.
 
 ---
 
-## 10. 다음 미리보기
+## 15. 다음 섹션 미리보기
 
-이번 범위 다음에 올 내용은 `2.7 Alarms`(정해진 시각에 DO 스스로 깨어나기 — 리마인더 기능의 토대), `2.8 WebSockets` / `2.9 Upgrades`(드디어 실시간 연결), `2.10 Messages`다. 그 다음 Section 3부터 `AgentState`, `Callables` 등 **Agents SDK**로 넘어간다. 지금까지의 흐름을 쌓아 올리면:
+Section 2에서 만든 것을 한 줄로 요약하면 **"이름당 하나뿐이고, 자기 DB가 있고, 스스로 깨어나고, 연결을 붙들 수 있는 작은 서버"** 다. Section 3의 Agents SDK는 이 위에 `Agent` 클래스를 얹는다. `this.setState()`로 상태를 두면 연결된 클라이언트 전원에게 자동 브로드캐스트되고(2.10의 `broadcast`), `this.schedule()` / `scheduleEvery()`로 알람을 여러 개 걸 수 있으며(2.7의 알람 체인), `@callable` 메서드는 브라우저에서 RPC처럼 부른다(2.3의 스텁 호출). 지금까지의 흐름:
 
 ```
 Workers (무상태 함수)
-  └─ Durable Objects (이름당 하나, RAM + SQLite, 단일 스레드)   ← 지금 여기
-       └─ + Alarms + WebSockets (스케줄, 실시간)                 ← 다음
-            └─ Agents SDK의 Agent 클래스
+  └─ Durable Objects (이름당 하나, RAM + SQLite, 단일 스레드)
+       └─ + Alarms + WebSockets (스케줄, 실시간)                 ← 지금 여기 (Section 2 완료)
+            └─ Agents SDK의 Agent 클래스 (AgentState, Callables, schedule)   ← 다음
                  └─ Nomad Claw
 ```
