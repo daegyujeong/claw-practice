@@ -1,28 +1,83 @@
 /**
  * ============================================================
- * 3.0 — Agent Foundations 프로젝트 셋업
+ * Section 3 — Agent 클래스 (3.0 프로젝트 셋업, 3.1 상태 동기화)
  * ============================================================
  *
- * Agent 클래스는 Durable Object 위에 얹힌 고수준 추상화다.
- * DO가 주는 것(고유 인스턴스, SQLite 저장소, WebSocket)을 전부 갖고 있지만
- * API가 훨씬 편하다. `npm install agents`로 설치했다.
- *
- * 이번 섹션 목표: 지난 섹션의 DO 채팅방을 Agent 클래스로 다시 만들기.
- * 이번에는 콘솔이 아니라 React 프론트엔드로 (아직 AI는 없음).
+ * 이 챕터의 핵심 개념:
+ * - Agent 클래스는 Durable Object 위에 얹힌 고수준 추상화다.
+ *   Durable Object가 주는 것(고유 인스턴스, SQLite 저장소, WebSocket)을
+ *   전부 갖고 있지만 API가 훨씬 편하다. (`agents` npm 패키지)
+ * - Agent는 `state`라는 일반 JS 객체를 갖고, `this.setState()`로 바꾸면
+ *   ① 내장 SQLite DB에 자동 저장되고(테이블 만들 필요 없음)
+ *   ② WebSocket으로 연결된 모든 프론트엔드에 자동 브로드캐스트된다.
+ * - 지난 섹션(Durable Objects)에서 직접 하던 WebSocket 업그레이드/브로드캐스트를
+ *   여기서는 `routeAgentRequest()` + `useAgent` 훅이 대신 해준다.
  */
-import { Agent } from "agents";
+
+// Agent 클래스와 라우팅 헬퍼는 강의에서 설치한 `agents` 패키지에서 온다.
+// (Cloudflare 전용 프레임워크 문법 — JS 표준이 아니다)
+import { Agent, routeAgentRequest } from "agents";
 
 /**
- * 채팅방 에이전트. 아직 비어 있다 — 3.1에서 state를 채운다.
- * Agent도 결국 Durable Object이므로 wrangler.jsonc에
- * DO 바인딩 + new_sqlite_classes 마이그레이션을 추가해야 한다.
+ * 프론트엔드와 공유하는 상태 타입.
+ * export 하는 이유: src/App.tsx의 useAgent 제네릭에 넘겨서
+ * `agent.state.pingPongCount` 자동완성/타입 체크를 받기 위해서다.
+ * (백엔드-프론트엔드가 한 저장소에 있어서 가능한 풀스택 타입 안전성)
  */
-export class ChattingRoomAgent extends Agent<Env> {}
+export type PingPongState = {
+  pingPongCount: number;
+};
+
+/**
+ * 채팅방 에이전트 — 지금은 핑퐁 카운터 데모만 들어 있다.
+ *
+ * 제네릭 <Env, PingPongState>:
+ * - Env: wrangler.jsonc의 바인딩들(KV 등 나중에 쓸 것)을 타입으로 알려준다.
+ * - PingPongState: this.state / setState의 타입을 고정한다.
+ */
+export class ChattingRoomAgent extends Agent<Env, PingPongState> {
+  /**
+   * 초기 상태는 "Durable Object가 처음 만들어질 때 딱 한 번"만 적용된다.
+   * 이후 요청은 하이버네이션에서 깨어날 뿐 다시 생성되지 않으므로,
+   * initialState가 기존 상태를 덮어쓰는 일은 없다. (함정 주의!)
+   */
+  initialState: PingPongState = {
+    pingPongCount: 0,
+  };
+
+  /**
+   * 상태 변경은 반드시 setState로 한다 (React 클래스 컴포넌트와 같은 패턴).
+   * setState가 SQLite 저장 + 연결된 클라이언트 전원에게 브로드캐스트까지 해준다.
+   * 이 메서드들은 다음 강의(3.2)에서 프론트엔드가 호출하게 된다.
+   */
+  increment() {
+    this.setState({ pingPongCount: this.state.pingPongCount + 1 });
+  }
+
+  decrement() {
+    this.setState({ pingPongCount: this.state.pingPongCount - 1 });
+  }
+}
 
 export default {
-  // 3.0 시점에는 자리만 잡아 둔다. 프론트엔드를 에이전트에 연결하는
-  // 라우팅(routeAgentRequest)은 3.1에서 추가한다.
-  async fetch() {
+  /**
+   * 워커 진입점. useAgent 훅이 보내는 WebSocket 업그레이드 요청은
+   * `/agents/chatting-room-agent/<세션이름>` 같은 URL로 들어온다
+   * (클래스 이름이 kebab-case로 변환된 것).
+   *
+   * routeAgentRequest()가 그 URL을 파싱해서
+   * 알맞은 Agent 인스턴스를 찾고(없으면 생성/깨움),
+   * WebSocket 업그레이드까지 전부 처리한 Response를 돌려준다.
+   * 지난 섹션에서 손으로 하던 idFromName → get → fetch 과정의 자동화판.
+   */
+  async fetch(request, env) {
+    const agentResponse = await routeAgentRequest(request, env);
+
+    // 에이전트로 가는 요청이면 그 응답을 그대로 전달하고,
+    // 아니면(엉뚱한 URL) 404를 돌려준다.
+    if (agentResponse) {
+      return agentResponse;
+    }
     return new Response(null, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
