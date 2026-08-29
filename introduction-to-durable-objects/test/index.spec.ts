@@ -1,33 +1,51 @@
-import { env, runInDurableObject, SELF } from 'cloudflare:test';
+import { SELF } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 
-describe('2.9 Upgrades — WebSocket 연결 열기', () => {
-	it('/ws 가 아니거나 Upgrade 헤더가 없으면 404', async () => {
-		const root = await SELF.fetch('https://example.com/');
-		expect(root.status).toBe(404);
+/** 같은 방에 nickname으로 접속해 client 소켓을 돌려받는다 */
+async function connect(roomId: string, nickname: string): Promise<WebSocket> {
+	const res = await SELF.fetch(`https://example.com/ws?roomId=${roomId}&nickname=${nickname}`, {
+		headers: { Upgrade: 'websocket' },
+	});
+	expect(res.status).toBe(101);
+	const ws = res.webSocket!;
+	ws.accept();
+	return ws;
+}
 
-		const noUpgrade = await SELF.fetch('https://example.com/ws');
-		expect(noUpgrade.status).toBe(404);
+/** 다음 메시지 한 개를 기다린다 */
+function nextMessage(ws: WebSocket): Promise<string> {
+	return new Promise((resolve) => {
+		ws.addEventListener('message', (e) => resolve(e.data as string), { once: true });
+	});
+}
+
+describe('2.10 Messages — 채팅방', () => {
+	it('한 명이 말하면 나머지에게만 닉네임과 함께 전달된다', async () => {
+		const nico = await connect('room1', 'nico');
+		const lin = await connect('room1', 'lin');
+
+		const heardByLin = nextMessage(lin);
+		nico.send('hello');
+		expect(await heardByLin).toBe('nico said: hello');
 	});
 
-	it('/ws + Upgrade 헤더 → 101 응답과 client 소켓을 받는다', async () => {
-		const res = await SELF.fetch('https://example.com/ws?roomId=test', {
-			headers: { Upgrade: 'websocket' },
-		});
-		expect(res.status).toBe(101);
-		expect(res.webSocket).toBeDefined();   // 101 응답에 실려 온 client 끝
-		res.webSocket!.accept();               // 테스트(클라이언트) 쪽에서 연결 수락
-		res.webSocket!.close();
+	it('다른 방에는 메시지가 새지 않는다 (방 = DO 격리)', async () => {
+		const a = await connect('roomA', 'nico');
+		const b = await connect('roomB', 'lin');
+
+		let leaked = false;
+		b.addEventListener('message', () => { leaked = true; });
+		a.send('secret');
+		await new Promise((r) => setTimeout(r, 100));
+		expect(leaked).toBe(false);
 	});
 
-	it('연결이 DO의 메모리에 보관된다 (getWebSockets)', async () => {
-		const res = await SELF.fetch('https://example.com/ws?roomId=count', {
-			headers: { Upgrade: 'websocket' },
-		});
-		res.webSocket!.accept();
+	it('누가 나가면 남은 사람에게 알림이 간다', async () => {
+		const nico = await connect('room2', 'nico');
+		const lin = await connect('room2', 'lin');
 
-		const stub = env.DP.getByName('count');
-		const sockets = await runInDurableObject(stub, (_instance, state) => state.getWebSockets().length);
-		expect(sockets).toBe(1);
+		const heardByNico = nextMessage(nico);
+		lin.close();
+		expect(await heardByNico).toBe('lin has left the building.');
 	});
 });

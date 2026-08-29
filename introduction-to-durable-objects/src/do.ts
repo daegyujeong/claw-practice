@@ -1,28 +1,24 @@
 /**
  * ─────────────────────────────────────────────────────────────
- * 2.9 Upgrades — 진짜로 WebSocket 연결을 연다
+ * 2.10 Messages — 닉네임을 붙이고, 모두에게 뿌린다 (채팅방 완성)
  * ─────────────────────────────────────────────────────────────
- * ★ WebSocketPair = 실 전화기의 양쪽 끝
- *   new WebSocketPair()는 서로 연결된 소켓 두 개를 만든다.
- *   client 끝 → 101 응답에 실어 브라우저에게 준다.
- *   server 끝 → ctx.acceptWebSocket()으로 DO가 보관한다.
- *   이제 브라우저가 client에 말하면 DO의 server에서 들린다.
+ * ★ serializeAttachment — 연결에 작은 데이터를 붙인다
+ *   URL로 받은 닉네임을 연결 자체에 저장해 두면, 이후 핸들러에서
+ *   ws.deserializeAttachment()로 "누가 보냈는지"를 바로 안다.
+ *   하이버네이션을 넘어 유지된다 (메모리 프로퍼티에 두면 잠들 때 날아간다!).
+ *   한도 16 KiB — 식별 정보용이다. 큰 데이터는 SQLite에 두고 키만 붙인다.
  *
- * ★ acceptWebSocket을 부르는 순간 세 메서드가 활성화된다 (오버라이드만 하면 됨)
- *   webSocketMessage(ws, message)          : 메시지가 왔을 때
- *   webSocketClose(ws, code, reason, ...)  : 누가 나갔을 때
- *   webSocketError(ws, error)              : 오류가 났을 때
+ * ★ broadcast — 클라이언트끼리는 서로 모른다 (P2P가 아니다)
+ *   전원이 같은 DO에 붙어 있을 뿐이므로, 서버가 받은 메시지를
+ *   ctx.getWebSockets()(이 DO의 모든 연결)를 순회하며 전달해야 채팅이 된다.
+ *   exclude: 보낸 본인에게 자기 메시지를 되돌려주지 않기 위한 제외 인자.
  *
- * ★ 함정: server.accept()가 아니라 this.ctx.acceptWebSocket(server)다!
- *   전자(표준 API)는 DO가 연결을 직접 들고 있어야 해서 하이버네이션이 안 되고
- *   연결 내내 요금이 붙는다. 후자(Hibernation API)는 DO가 잠들어도
- *   Cloudflare가 연결을 붙들고 있다가, 메시지가 오면 DO를 깨워 준다.
- *   (잠들면 메모리는 초기화되고 constructor가 다시 실행된다 — 2.3과 동일)
+ * 방(roomId)마다 DO가 다르므로 getWebSockets()도 방 단위로 격리된다 —
+ * private 방의 메시지는 public 방에 절대 새지 않는다.
  *
- * ★ 개발 중 파일을 저장하면 서버가 재시작되어 연결이 전부 끊긴다 (배포도 마찬가지).
- *   버그가 아니다 — 클라이언트가 재접속하면 된다.
- *
- * 터미널 테스트: websocat "ws://localhost:8787/ws?roomId=private&nickname=nico"
+ * 터미널 두 개로 테스트:
+ *   websocat "ws://localhost:8787/ws?roomId=private&nickname=nico"
+ *   websocat "ws://localhost:8787/ws?roomId=private&nickname=lin"
  */
 import { DurableObject } from 'cloudflare:workers';
 
@@ -36,17 +32,27 @@ export class DurablePotato extends DurableObject<Env> {
 
         this.ctx.acceptWebSocket(server);
 
-        // nickname은 아직 안 쓴다 — 2.10에서 serializeAttachment로 연결에 붙인다.
+        server.serializeAttachment({ nickname });   // 이 연결의 주인 이름표
 
-        // 101 = Switching Protocols. body 대신 webSocket에 client 끝을 실어 준다.
         return new Response(null, { status: 101, webSocket: client });
     }
 
+    broadcast(message: string, exclude?: WebSocket) {
+        for (const socket of this.ctx.getWebSockets()) {
+            if (socket !== exclude) {
+                socket.send(message);
+            }
+        }
+    }
+
     webSocketMessage(ws: WebSocket, message: string) {
-        console.log(message);
+        // Cloudflare가 "지금 말한 사람의 연결"을 ws로 넘겨준다.
+        const { nickname } = ws.deserializeAttachment() as { nickname: string };
+        this.broadcast(`${nickname} said: ${message}`, ws);   // 본인 제외
     }
 
     webSocketClose(ws: WebSocket) {
-        console.log('someone left');
+        const { nickname } = ws.deserializeAttachment() as { nickname: string };
+        this.broadcast(`${nickname} has left the building.`); // 나간 사람은 이미 없으니 제외 불필요
     }
 }
