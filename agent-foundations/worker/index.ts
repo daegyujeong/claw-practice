@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 3 — Agent 클래스 (3.1 AgentState, 3.2 Callables, 3.3 Messages)
+ * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.4 Storage and Broadcast)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -13,6 +13,11 @@
  * - 3.3(Messages)에서 핑퐁 카운터를 채팅방으로 리팩터링했다:
  *   상태는 접속자 수(currentlyOnline)가 되고, onConnect/onClose/onMessage로
  *   WebSocket 연결 생명주기를 직접 다룬다. 핑퐁 버전은 3.2 커밋에 남아 있다.
+ * - 3.4(Storage and Broadcast): 메시지는 state가 아니라 에이전트 내장
+ *   SQLite(this.sql)에 저장하고, this.broadcast로 전원에게 보낸다.
+ *   state는 바뀔 때마다 "전체"가 모든 클라이언트에 재전송되므로,
+ *   쌓이는 데이터(메시지 1만 개)를 state에 넣으면 1개 추가마다
+ *   1만 1개가 전원에게 나간다 — 그래서 SQL이다.
  */
 
 // Connection: WebSocket 연결 하나를 대표하는 객체 (그 연결로 직접 send 가능)
@@ -32,7 +37,7 @@ export type ChattingRoomState = {
 
 /**
  * 채팅방 에이전트 — 아직 AI는 없다. 이 챕터는 Agent 클래스의
- * 원시 기능(상태, RPC, WebSocket 이벤트)을 익히는 단계다.
+ * 원시 기능(상태, RPC, WebSocket 이벤트, 저장소)을 익히는 단계다.
  */
 export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   /**
@@ -45,6 +50,25 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   };
 
   /**
+   * 3.4 — 에이전트가 (재)기동할 때 호출된다. 메시지를 저장할 테이블 생성.
+   * Agent(=DO)는 인스턴스마다 전용 SQLite DB를 갖고 this.sql로 접근한다.
+   * Section 1의 KV(전 세계 공유·최종 일관성·같은 키 쓰기 초당 1회)와
+   * 정반대로, 이 DB는 인스턴스 전용·강한 일관성·지연 없음이다.
+   * 하이버네이션에서 깨어날 때도 다시 불릴 수 있으므로 CREATE TABLE에는
+   * IF NOT EXISTS가 필수다. (앞의 void는 반환값을 일부러 안 쓴다는 표시)
+   */
+  onStart() {
+    void this.sql`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nickname TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  /**
    * 3.2 — 상태가 바뀔 때마다 "누가 바꿨는지"를 알려주는 콜백.
    * - @callable 메서드가 서버 안에서 setState 하면 source는 "server"
    * - 프론트가 agent.setState로 직접 덮어쓰면(override) source는 그 Connection
@@ -54,6 +78,17 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   onStateChanged(state: ChattingRoomState, source: Connection | "server"): void {
     console.log("new state", state);
     console.log("who did it", source);
+  }
+
+  /**
+   * 3.4 — 클라이언트발 setState(override)를 "막는" 훅.
+   * onStateChanged(사후 감시)와 달리 저장 전에 동기적으로 실행되고,
+   * throw하면 상태 변경 자체가 거부된다.
+   * 함정: 프론트가 @callable 메서드를 호출한 경우 그 메서드는 서버에서
+   * 실행되므로 source는 "server"다 — 이 검사는 직접 override만 막는다.
+   */
+  validateStateChange(_nextState: ChattingRoomState, source: Connection | "server"): void {
+    if (source !== "server") throw new Error("cant do this.");
   }
 
   /**
@@ -76,13 +111,23 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   }
 
   /**
-   * 3.3 — 이 연결로부터 메시지를 받았을 때 호출된다.
-   * connection.send는 "보낸 사람에게만" 회신한다 — 전원에게 보내려면
-   * setState(상태 브로드캐스트)나 this.broadcast를 쓴다(다음 챕터 3.4 예고).
+   * 3.4 — 받은 메시지를 SQL에 저장하고 전원에게 브로드캐스트한다.
+   * - this.sql은 태그드 템플릿이라 ${} 자리 값이 자동으로 파라미터
+   *   바인딩된다 → 문자열 결합이 아니므로 SQL 인젝션에서 안전하다.
+   * - broadcast의 두 번째 인자는 "제외할 연결 id 배열" — 보낸 본인은
+   *   빼고 전송한다.
+   * - 닉네임은 아직 인증이 없어 "anon" 고정 — 3.5 Authentication에서 채운다.
    */
   onMessage(connection: Connection, message: WSMessage) {
-    console.log(message);
-    connection.send("love you back");
+    const messageObj = {
+      nickname: "anon",
+      message: message.toString(),
+      created_at: Date.now(),
+    };
+    void this.sql`
+      INSERT INTO messages (nickname, message, created_at) VALUES (${messageObj.nickname}, ${messageObj.message}, ${messageObj.created_at})
+    `;
+    this.broadcast(JSON.stringify(messageObj), [connection.id]);
   }
 }
 
