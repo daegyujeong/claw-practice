@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.4 Storage and Broadcast)
+ * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.5 Authentication)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -8,23 +8,29 @@
  *   Durable Object가 주는 것(고유 인스턴스, SQLite 저장소, WebSocket)을
  *   전부 갖고 있지만 API가 훨씬 편하다. (`agents` npm 패키지)
  * - Agent는 `state`라는 일반 JS 객체를 갖고, `this.setState()`로 바꾸면
- *   ① 내장 SQLite DB에 자동 저장되고(테이블 만들 필요 없음)
- *   ② WebSocket으로 연결된 모든 프론트엔드에 자동 브로드캐스트된다.
- * - 3.3(Messages)에서 핑퐁 카운터를 채팅방으로 리팩터링했다:
- *   상태는 접속자 수(currentlyOnline)가 되고, onConnect/onClose/onMessage로
- *   WebSocket 연결 생명주기를 직접 다룬다. 핑퐁 버전은 3.2 커밋에 남아 있다.
- * - 3.4(Storage and Broadcast): 메시지는 state가 아니라 에이전트 내장
- *   SQLite(this.sql)에 저장하고, this.broadcast로 전원에게 보낸다.
- *   state는 바뀔 때마다 "전체"가 모든 클라이언트에 재전송되므로,
- *   쌓이는 데이터(메시지 1만 개)를 state에 넣으면 1개 추가마다
- *   1만 1개가 전원에게 나간다 — 그래서 SQL이다.
+ *   ① 내장 SQLite DB에 자동 저장되고 ② 전 클라이언트에 자동 브로드캐스트된다.
+ * - 3.3(Messages): 핑퐁 카운터를 채팅방으로 리팩터링 (핑퐁은 3.2 커밋에).
+ * - 3.4(Storage and Broadcast): 메시지는 state가 아니라 내장 SQL(this.sql)에
+ *   저장하고 this.broadcast로 전송 — state는 바뀔 때마다 "전체"가
+ *   모든 클라이언트에 재전송되므로 쌓이는 데이터는 SQL에 둔다.
+ * - 3.5(Authentication): 닉네임을 접속 URL 쿼리로 받아 connection.setState
+ *   (연결별 상태)에 저장하고, loadHistory @callable로 과거 메시지를 내려준다.
  */
 
 // Connection: WebSocket 연결 하나를 대표하는 객체 (그 연결로 직접 send 가능)
+// ConnectionContext: 연결 순간의 원본 HTTP 요청(ctx.request) 접근용
 // WSMessage: onMessage로 들어오는 메시지 타입 (문자열 또는 바이너리)
-// 강사 코드는 callable도 import를 유지하지만, 3.3에서 @callable 메서드가
-// 사라져 안 쓰는 import는 이 프로젝트의 타입 체크에서 에러라 뺐다 (뒤 챕터에서 복귀).
-import { Agent, routeAgentRequest, type Connection, type WSMessage } from "agents";
+// callable: 3.2에서 뺐던 import가 loadHistory와 함께 복귀했다.
+// getCurrentAgent: connection 인자가 없는 메서드 안에서 호출자 정보를 얻는 도구.
+import {
+  Agent,
+  callable,
+  getCurrentAgent,
+  routeAgentRequest,
+  type Connection,
+  type ConnectionContext,
+  type WSMessage,
+} from "agents";
 
 /**
  * 프론트엔드와 공유하는 상태 타입 (3.3에서 PingPongState를 대체).
@@ -68,17 +74,12 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
     `;
   }
 
-  /**
-   * 3.2 — 상태가 바뀔 때마다 "누가 바꿨는지"를 알려주는 콜백.
-   * - @callable 메서드가 서버 안에서 setState 하면 source는 "server"
-   * - 프론트가 agent.setState로 직접 덮어쓰면(override) source는 그 Connection
-   * 브로드캐스트가 끝난 뒤에 불리므로 감시용이다 — 잘못된 변경을 "막는" 건
-   * validateStateChange(저장 전에 실행, throw하면 거부)의 몫이다.
-   */
-  onStateChanged(state: ChattingRoomState, source: Connection | "server"): void {
-    console.log("new state", state);
-    console.log("who did it", source);
-  }
+  // 3.5 — 학습용 로그가 시끄러워 강사와 동일하게 주석 처리 (내용은 3.4 커밋에).
+  // 역할: 상태 변경 "사후 감시" — source("server" | Connection)로 누가 바꿨는지 확인.
+  // onStateChanged(state: ChattingRoomState, source: Connection | "server"): void {
+  //   console.log("new state", state);
+  //   console.log("who did it", source);
+  // }
 
   /**
    * 3.4 — 클라이언트발 setState(override)를 "막는" 훅.
@@ -92,12 +93,18 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   }
 
   /**
-   * 3.3 — 새 클라이언트가 WebSocket으로 연결될 때마다 호출된다.
-   * setState가 브로드캐스트까지 해주므로, 접속자 수가 모든 클라이언트에
-   * 실시간으로 반영된다. (원형은 onConnect(connection, ctx) — ctx.request로
-   * 헤더·쿠키를 보고 인증한 뒤 connection.close()로 거절하는 자리다)
+   * 3.5 — 3.3에서 예고했던 원형 onConnect(connection, ctx)를 드디어 쓴다.
+   * useAgent의 query 옵션이 실어 보낸 닉네임을 접속 URL에서 꺼내
+   * "그 연결 전용 상태"(connection.setState)에 저장한다 — 에이전트 전체
+   * state와는 별개이고, 하이버네이션에도 살아남는다.
+   * (실전이라면 ctx.request의 헤더·쿠키로 진짜 인증을 하는 자리다)
    */
-  onConnect() {
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    const url = new URL(ctx.request.url);
+    const nickname = url.searchParams.get("nickname") ?? "anon";
+
+    connection.setState({ nickname });
+
     this.setState({
       currentlyOnline: this.state.currentlyOnline + 1,
     });
@@ -111,23 +118,41 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   }
 
   /**
-   * 3.4 — 받은 메시지를 SQL에 저장하고 전원에게 브로드캐스트한다.
-   * - this.sql은 태그드 템플릿이라 ${} 자리 값이 자동으로 파라미터
-   *   바인딩된다 → 문자열 결합이 아니므로 SQL 인젝션에서 안전하다.
-   * - broadcast의 두 번째 인자는 "제외할 연결 id 배열" — 보낸 본인은
-   *   빼고 전송한다.
-   * - 닉네임은 아직 인증이 없어 "anon" 고정 — 3.5 Authentication에서 채운다.
+   * 3.5 — 보낸 사람의 닉네임을 connection.state에서 읽는다.
+   * Connection<{ nickname: string }> 제네릭이 connection.state의 타입이다.
+   * (타입상 state는 setState 전까지 null일 수 있어 ?. + 기본값을 붙였다 —
+   *  강사 코드는 connection.state.nickname 바로 접근, 이 프로젝트는 strict라 에러)
+   * broadcast는 3.4의 [connection.id](본인 제외)를 버리고 전원 전송으로
+   * 바꿨다 — 내 메시지도 다른 사람 메시지와 똑같이 onMessage 한 곳으로
+   * 받아서, 화면 표시 로직을 하나로 통일하기 위해서다.
    */
-  onMessage(connection: Connection, message: WSMessage) {
+  onMessage(connection: Connection<{ nickname: string }>, message: WSMessage) {
     const messageObj = {
-      nickname: "anon",
+      nickname: connection.state?.nickname ?? "anon",
       message: message.toString(),
       created_at: Date.now(),
     };
     void this.sql`
       INSERT INTO messages (nickname, message, created_at) VALUES (${messageObj.nickname}, ${messageObj.message}, ${messageObj.created_at})
     `;
-    this.broadcast(JSON.stringify(messageObj), [connection.id]);
+    // this.broadcast(JSON.stringify(messageObj), [connection.id]);  // 3.4 버전(본인 제외)
+    this.broadcast(JSON.stringify(messageObj));
+  }
+
+  /**
+   * 3.5 — 접속 직후 프론트가 과거 메시지를 불러가는 RPC
+   * (프론트: await agent.stub.loadHistory()).
+   * getCurrentAgent(): onMessage처럼 connection 인자가 없는 메서드 안에서도
+   * "지금 이 호출을 일으킨 커넥션"을 꺼내오는 도구 — 누가 불렀는지 알 수 있다.
+   * (강사는 connection.state로 바로 접근하지만, 타입상 connection이
+   *  undefined일 수 있어 ?. 를 붙였다)
+   * LIMIT 100: 전체 메시지를 통째로 내려보내지 않기 위한 최소한의 안전장치.
+   */
+  @callable()
+  loadHistory() {
+    const { connection } = getCurrentAgent<ChattingRoomAgent>();
+    console.log(connection?.state, "loaded history");
+    return this.sql`SELECT * FROM messages ORDER BY created_at ASC LIMIT 100`;
   }
 }
 
