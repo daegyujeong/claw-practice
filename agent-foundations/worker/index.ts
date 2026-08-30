@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 3 — Agent 클래스 (3.0 프로젝트 셋업, 3.1 상태 동기화)
+ * Section 3 — Agent 클래스 (3.0 셋업, 3.1 상태 동기화, 3.2 callable 호출)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -12,11 +12,13 @@
  *   ② WebSocket으로 연결된 모든 프론트엔드에 자동 브로드캐스트된다.
  * - 지난 섹션(Durable Objects)에서 직접 하던 WebSocket 업그레이드/브로드캐스트를
  *   여기서는 `routeAgentRequest()` + `useAgent` 훅이 대신 해준다.
+ * - 3.2: `@callable()`을 붙인 메서드는 프론트엔드가 직접 호출할 수 있다 (RPC).
  */
 
 // Agent 클래스와 라우팅 헬퍼는 강의에서 설치한 `agents` 패키지에서 온다.
+// callable은 3.2에서 추가 — 메서드를 프론트엔드에 노출하는 데코레이터.
 // (Cloudflare 전용 프레임워크 문법 — JS 표준이 아니다)
-import { Agent, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 
 /**
  * 프론트엔드와 공유하는 상태 타입.
@@ -46,14 +48,23 @@ export class ChattingRoomAgent extends Agent<Env, PingPongState> {
   };
 
   /**
-   * 상태 변경은 반드시 setState로 한다 (React 클래스 컴포넌트와 같은 패턴).
-   * setState가 SQLite 저장 + 연결된 클라이언트 전원에게 브로드캐스트까지 해준다.
-   * 이 메서드들은 다음 강의(3.2)에서 프론트엔드가 호출하게 된다.
+   * 3.2 — @callable(): 이 메서드를 프론트엔드에서 호출할 수 있게 만든다.
+   * 프론트에서는 `agent.stub.increment()`처럼 부른다 (stub = 원격 객체의
+   * 대리 객체라는 RPC 용어. 녹취에는 "stop"으로 들리지만 stub이 맞다).
+   *
+   * - 데코레이터 문법이라 Vite가 그냥은 못 읽는다 → vite.config.ts에
+   *   agents/vite 플러그인을 추가해야 한다 (3.2에서 함께 수정).
+   * - 상태 변경 자체는 서버(에이전트) 안에서 일어나므로, 상태 변경 콜백의
+   *   source에 "server"로 찍힌다. 프론트가 setState를 직접 부르는 override와
+   *   구분되는 지점 (App.tsx의 override 버튼 주석 참고).
+   * - setState가 SQLite 저장 + 연결된 클라이언트 전원 브로드캐스트까지 해주므로
+   *   여기서 따로 응답을 보낼 필요가 없다.
    */
+  @callable()
   increment() {
     this.setState({ pingPongCount: this.state.pingPongCount + 1 });
   }
-
+  @callable()
   decrement() {
     this.setState({ pingPongCount: this.state.pingPongCount - 1 });
   }

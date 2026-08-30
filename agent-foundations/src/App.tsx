@@ -1,11 +1,12 @@
 /**
- * 3.1 — 프론트엔드에서 Agent 상태 실시간 구독하기
+ * 3.1~3.2 — Agent 상태 실시간 구독 + 프론트엔드에서 메서드 호출
  *
  * 핵심: useAgent 훅 하나로 WebSocket 연결 + 상태 동기화가 끝난다.
  * API를 만들 필요도, fetch를 할 필요도 없다.
  * - 훅이 마운트되면 `/agents/chatting-room-agent/<이름>` 으로
  *   WebSocket 업그레이드 요청을 자동으로 보낸다.
  * - 워커의 routeAgentRequest()가 이 요청을 받아 에이전트에 연결해 준다.
+ * - 3.2: @callable 메서드는 `agent.stub.메서드()`로 호출한다.
  */
 import { useState } from "react";
 // useAgent는 React 전용 서브패키지에서 온다 (agents/react — 프레임워크 문법)
@@ -16,7 +17,9 @@ import type { ChattingRoomAgent, PingPongState } from "../worker";
 
 function App() {
   // 서버 상태의 로컬 복사본. onStateUpdate로 받은 값을 여기 담아 렌더링한다.
-  // (agent.state를 직접 읽는 것보다 React 상태에 담는 편이 안전하다 — 강의 방식)
+  // 3.2에서 강사가 "onStateUpdate 없이 agent.state를 JSX에서 직접 읽어도
+  // 된다"고 한 게 이 부분이다 — 직접 읽기로 바꿔도 되고, 상태 변경 순간마다
+  // 다른 로직(로그, 알림 등)을 끼우고 싶으면 지금처럼 콜백을 유지한다.
   const [pingPongs, setPingPongs] = useState(0);
 
   // WebSocket 연결이 열렸는지 여부. 열리기 전에는 state가 없으므로
@@ -39,11 +42,7 @@ function App() {
       setPingPongs(state.pingPongCount);
     },
   });
-
-  // 3.1 시점에는 agent 객체를 아직 직접 쓰지 않는다 (3.2에서 increment/decrement
-  // 호출에 사용 예정). 이 프로젝트는 noUnusedLocals가 켜져 있어 안 쓰는 변수는
-  // 컴파일 에러가 나므로, 임시로 참조만 해 둔다.
-  void agent;
+  // (3.1의 `void agent;` 임시 참조는 3.2에서 agent를 실제로 쓰게 되면서 제거)
 
   if (!isConnected) {
     return <h1>Connecting...</h1>;
@@ -54,7 +53,16 @@ function App() {
       <h1>Ping Pong Agent</h1>
       {/* 이 숫자는 에이전트의 SQLite에 저장된 상태에서 실시간으로 온 값이다 */}
       <h3>Ping pong count: {pingPongs}</h3>
-      {/* agent 객체(increment/decrement 호출)는 다음 강의 3.2에서 사용한다 */}
+      <hr />
+      {/* 3.2 — @callable 메서드 호출. agent.stub이 원격 메서드의 대리 객체다.
+          실제 setState는 서버 안에서 실행된다 (source: "server"). */}
+      <button onClick={() => agent.stub.decrement()}>decrement</button>
+      <button onClick={() => agent.stub.increment()}>increment</button>
+      {/* 3.2 — override: 서버 메서드를 거치지 않고 프론트가 상태를 직접
+          덮어쓴다 (source: WebSocket 연결). 지금은 아무 클라이언트나 이걸 할 수
+          있는 보안 구멍이라 데모용 — 실전에서는 @callable 메서드 안에서 검증하고,
+          뒤 강의의 read-only connections로 막는다. */}
+      <button onClick={() => agent.setState({ pingPongCount: 10000 })}>override</button>
     </div>
   );
 }
