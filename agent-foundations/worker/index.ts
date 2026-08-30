@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.6 Read Only Connections)
+ * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.7 Schedule Tasks)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -17,6 +17,8 @@
  *   (연결별 상태)에 저장하고, loadHistory @callable로 과거 메시지를 내려준다.
  * - 3.6(Read Only Connections): 닉네임에 "read"가 들어간 연결은 읽기 전용 —
  *   프론트 setState는 물론 상태를 바꾸는 @callable 호출도 차단된다.
+ * - 3.7(Schedule Tasks): schedule/scheduleEvery로 에이전트가 스스로
+ *   정해진 시간에 자기 메서드를 실행한다 (DO 단일 알람의 한계를 감싼 API).
  */
 
 // Connection: WebSocket 연결 하나를 대표하는 객체 (그 연결로 직접 send 가능)
@@ -145,11 +147,29 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
       message: message.toString(),
       created_at: Date.now(),
     };
+    // 3.7 — 메시지에 "delete"가 들어 있으면 30초마다 deleteMessages 실행 예약.
+    // 두 번째 인자는 "이 클래스의 메서드 이름 문자열"이고, 그 이름의 메서드가
+    // 실제로 있는지 TypeScript가 검사해준다 (deleteMessages 정의 전엔 타입 에러).
+    if (message.toString().includes("delete")) {
+      this.scheduleEvery(30, "deleteMessages");
+    }
     void this.sql`
       INSERT INTO messages (nickname, message, created_at) VALUES (${messageObj.nickname}, ${messageObj.message}, ${messageObj.created_at})
     `;
     // this.broadcast(JSON.stringify(messageObj), [connection.id]);  // 3.4 버전(본인 제외)
     this.broadcast(JSON.stringify(messageObj));
+  }
+
+  /**
+   * 3.7 — 스케줄이 부르는 콜백. DO의 원래 알람은 한 번에 하나뿐이라
+   * 여러 예약을 쓰려면 알람 테이블을 SQL로 직접 관리해야 했는데,
+   * Agent의 schedule API가 그걸 감싸준다:
+   *   schedule(초 | Date | cron 문자열, "메서드명", payload?)
+   *   scheduleEvery(초, "메서드명") / listSchedules() / cancelSchedule(id)
+   * 스케줄은 에이전트의 SQLite에 저장되므로 재시작·하이버네이션에도 살아남는다.
+   */
+  deleteMessages() {
+    void this.sql`DELETE FROM messages`;
   }
 
   /**
