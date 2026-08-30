@@ -2,7 +2,7 @@
 
 > Nomad Coders 「Cloudflare Agents」 강의 3챕터 실습 프로젝트.
 > 지난 섹션의 Durable Object 채팅방을 **Agent 클래스**로 다시 만든다. 이번에는 React 프론트엔드까지 (아직 AI는 없음).
-> 회차 구성은 강의 코드 저장소(nomadcoders/nomadclaw)의 커밋 체계를 따른다: 3.1 AgentState → 3.2 Callables → 3.3 Messages → ...
+> 회차 구성은 강의 코드 저장소(nomadcoders/nomadclaw)의 커밋 체계를 따른다: 3.1 AgentState → 3.2 Callables → 3.3 Messages → 3.4 Storage and Broadcast → 3.5 Authentication → 3.6 Read Only Connections → 3.7 Schedule Tasks.
 
 ## 이 챕터에서 배운 것
 
@@ -21,6 +21,18 @@ Agent의 `state`는 일반 JS 객체지만 `this.setState()` 하면 내장 SQLit
 ### 5. WebSocket 이벤트와 메시지 (3.3 Messages)
 핑퐁을 채팅방으로 리팩터링: 상태는 `ChattingRoomState`(접속자 수 `currentlyOnline`)가 되고, `onConnect`/`onClose`가 접속자 수를 갱신하며, `onMessage(connection, message)`가 수신을 처리한다. 프론트는 `agent.send(데이터)`로 보내고 `useAgent`의 `onMessage`(`event.data`)로 받는다. `connection.send`는 보낸 사람에게만 회신한다 — 전원 전송은 3.4에서.
 
+### 6. 메시지는 SQL에, 전송은 broadcast로 (3.4 Storage and Broadcast)
+state는 바뀔 때마다 **전체**가 모든 클라이언트에 재전송되므로 쌓이는 데이터(메시지)를 넣으면 안 된다. `onStart`에서 `this.sql`로 messages 테이블을 만들고(재기동마다 불릴 수 있으니 `IF NOT EXISTS`), `onMessage`가 받은 메시지를 INSERT 후 `this.broadcast(문자열, [제외할 id])`로 전송한다. `this.sql`은 태그드 템플릿이라 자동 파라미터 바인딩 — SQL 인젝션에서 안전하다. `validateStateChange`로 클라이언트발 override도 차단했다.
+
+### 7. 닉네임과 히스토리 (3.5 Authentication)
+프론트 `useAgent`의 `query: { nickname }`이 접속 URL에 닉네임을 싣고, `enabled: ready`로 닉네임 확정 전에는 연결 자체를 막는다. 서버 `onConnect(connection, ctx)`가 URL에서 닉네임을 꺼내 `connection.setState`(연결별 상태, 하이버네이션에도 유지)에 저장한다. `@callable loadHistory`가 과거 메시지를 내려주고(`getCurrentAgent()`로 호출자 확인), broadcast는 본인 포함 전원 전송으로 바꿔 화면 표시를 `onMessage` 한 곳으로 통일했다.
+
+### 8. 읽기 전용 연결 (3.6 Read Only Connections)
+`shouldConnectionBeReadonly(connection, ctx)`가 true를 반환한 연결은 프론트 setState는 물론 상태를 바꾸는 @callable 호출까지 차단된다(SQL만 읽는 RPC는 허용). 동적 전환은 `setConnectionReadonly(connection, true/false)`. 우리 `onConnect`가 setState를 하므로 read-only 연결은 접속 즉시 "Connection is read-only" 에러 — 프론트에선 `onStateUpdateError`로 잡는다.
+
+### 9. 예약 실행 (3.7 Schedule Tasks)
+DO의 원래 알람은 한 번에 하나지만 Agent의 schedule API가 감싸준다: `schedule(초|Date|cron, "메서드명", payload?)`, `scheduleEvery(초, ...)`, `listSchedules()`, `cancelSchedule(id)`. 스케줄은 SQLite에 저장돼 재시작·하이버네이션에도 유지된다. 데모: 메시지에 "delete"가 있으면 30초마다 `deleteMessages`(`DELETE FROM messages`) 실행.
+
 ## 명령어
 
 | 명령어 | 역할 |
@@ -32,18 +44,20 @@ Agent의 `state`는 일반 JS 객체지만 `this.setState()` 하면 내장 SQLit
 | `npx tsc -b` | 타입 체크 (프론트/워커 프로젝트 전부) |
 | `npm run build` | 배포용 빌드 |
 
-## 실습 코드 흐름 (3.3 기준)
+## 실습 코드 흐름 (3.7 기준)
 
 ```
-브라우저                          워커                        ChattingRoomAgent (DO)
-useAgent 훅 마운트 ──WS 업그레이드──▶ routeAgentRequest ──────▶ 인스턴스 생성/깨움
-   │                                                          initialState { currentlyOnline: 0 }
-   ◀───────── onOpen ─────────────────────────────────────────┤
-   │                                                          onConnect → currentlyOnline+1 (setState)
-   ◀── state 브로드캐스트 (Online ppl 갱신) ◀──────────────────┤
-   ├─ agent.send("hello") ──WS──────────────────────────────▶ onMessage(connection, message)
-   ◀── onMessage(event) ◀── connection.send("love you back") ─┘ (보낸 사람에게만)
-   └─ 탭 닫음 ──────────────────────────────────────────────▶ onClose → currentlyOnline-1
+브라우저                                워커                      ChattingRoomAgent (DO)
+닉네임 입력 → confirm (enabled: true)
+useAgent ──WS 업그레이드(?nickname=…)──▶ routeAgentRequest ─────▶ shouldConnectionBeReadonly 판정
+   │                                                            onConnect: connection.setState({nickname})
+   │                                                                       + currentlyOnline+1 (setState)
+   ◀── onOpen → await agent.stub.loadHistory() ◀───────────────  SELECT * FROM messages … LIMIT 100
+   ├─ agent.send("hi") ──WS───────────────────────────────────▶ onMessage: INSERT INTO messages
+   │                                                                       ("delete" 포함 시 scheduleEvery)
+   ◀── onMessage(JSON.parse(event.data)) ◀── broadcast(전원) ────┘
+   └─ 탭 닫음 ────────────────────────────────────────────────▶ onClose → currentlyOnline-1
+                                                                (30초 후 알람 → deleteMessages)
 ```
 
 ## 커밋 로드맵
@@ -52,7 +66,9 @@ useAgent 훅 마운트 ──WS 업그레이드──▶ routeAgentRequest ─�
 - [x] 3.1 AgentState — initialState/setState, increment·decrement, useAgent + onStateUpdate, routeAgentRequest
 - [x] 3.2 Callables — @callable, agent.stub 호출, agents/vite 플러그인, override와 onStateChanged(source)
 - [x] 3.3 Messages — ChattingRoomState(currentlyOnline), onConnect/onClose/onMessage, 메시지 폼 + agent.send
-- [ ] 3.4 Storage and Broadcast — 메시지 저장과 전원 전송
-- [ ] 3.5 Authentication — 연결 시 인증
-- [ ] 3.6 Read Only Connections — 쓰기 권한 제한
-- [ ] 3.7 Schedule Tasks — 예약 실행
+- [x] 3.4 Storage and Broadcast — onStart 테이블 생성, 메시지 INSERT + broadcast, validateStateChange
+- [x] 3.5 Authentication — query/enabled, connection.setState(닉네임), loadHistory + getCurrentAgent
+- [x] 3.6 Read Only Connections — shouldConnectionBeReadonly, onStateUpdateError
+- [x] 3.7 Schedule Tasks — scheduleEvery("deleteMessages") 데모
+- [ ] 과제 — 닉네임에 admin이 포함된 사용자에게만 채팅 기록 전체 삭제 버튼 (상태 변경 + broadcast 조합)
+- 다음 섹션: Agent를 상속한 **ChatAgent 클래스**로 진짜 챗봇 만들기
