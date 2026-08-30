@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.5 Authentication)
+ * Section 3 — Agent 클래스 (3.1 AgentState ~ 3.6 Read Only Connections)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -15,6 +15,8 @@
  *   모든 클라이언트에 재전송되므로 쌓이는 데이터는 SQL에 둔다.
  * - 3.5(Authentication): 닉네임을 접속 URL 쿼리로 받아 connection.setState
  *   (연결별 상태)에 저장하고, loadHistory @callable로 과거 메시지를 내려준다.
+ * - 3.6(Read Only Connections): 닉네임에 "read"가 들어간 연결은 읽기 전용 —
+ *   프론트 setState는 물론 상태를 바꾸는 @callable 호출도 차단된다.
  */
 
 // Connection: WebSocket 연결 하나를 대표하는 객체 (그 연결로 직접 send 가능)
@@ -81,15 +83,26 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   //   console.log("who did it", source);
   // }
 
+  // 3.6 — read-only 데모를 위해 강사와 동일하게 잠시 꺼둠 (3.4~3.5 커밋에 살아 있음).
+  // 역할: 저장 전에 실행되어 throw하면 클라이언트발 setState(override)를 거부하는 훅.
+  // 함정: @callable 경유 변경은 서버 실행이라 source가 "server" — 직접 override만 막는다.
+  // validateStateChange(_nextState: ChattingRoomState, source: Connection | "server"): void {
+  //   if (source !== "server") throw new Error("cant do this.");
+  // }
+
   /**
-   * 3.4 — 클라이언트발 setState(override)를 "막는" 훅.
-   * onStateChanged(사후 감시)와 달리 저장 전에 동기적으로 실행되고,
-   * throw하면 상태 변경 자체가 거부된다.
-   * 함정: 프론트가 @callable 메서드를 호출한 경우 그 메서드는 서버에서
-   * 실행되므로 source는 "server"다 — 이 검사는 직접 override만 막는다.
+   * 3.6 — 접속 순간 read-only 여부를 판정하는 훅. true를 반환한 연결은
+   * 프론트 setState는 물론, 상태를 바꾸는 @callable 호출까지 차단된다
+   * (상태를 안 건드리는 loadHistory 같은 RPC는 허용).
+   * 데모: 닉네임에 "read"가 들어가면 read-only.
+   * 함정: 우리 onConnect가 setState(접속자 수 +1)를 하므로 read-only
+   * 연결은 접속 즉시 "Connection is read-only" 에러를 만난다 —
+   * onConnect/onClose가 상태를 바꾸는 구조와는 충돌 주의.
    */
-  validateStateChange(_nextState: ChattingRoomState, source: Connection | "server"): void {
-    if (source !== "server") throw new Error("cant do this.");
+  shouldConnectionBeReadonly(_connection: Connection, ctx: ConnectionContext) {
+    const url = new URL(ctx.request.url);
+    const nickname = url.searchParams.get("nickname") ?? "anon";
+    return nickname.includes("read");
   }
 
   /**
@@ -151,6 +164,7 @@ export class ChattingRoomAgent extends Agent<Env, ChattingRoomState> {
   @callable()
   loadHistory() {
     const { connection } = getCurrentAgent<ChattingRoomAgent>();
+    // this.setConnectionReadonly(connection, true);  // 3.6 — 접속 이후 아무 때나 동적 전환하는 다른 방법
     console.log(connection?.state, "loaded history");
     return this.sql`SELECT * FROM messages ORDER BY created_at ASC LIMIT 100`;
   }

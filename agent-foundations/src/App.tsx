@@ -1,5 +1,5 @@
 /**
- * 3.1~3.5 — Agent 상태 실시간 구독 + 채팅방 프론트엔드
+ * 3.1~3.6 — Agent 상태 실시간 구독 + 채팅방 프론트엔드
  *
  * 핵심: useAgent 훅 하나로 WebSocket 연결 + 상태 동기화가 끝난다.
  * - 3.5(Authentication): 닉네임을 확정해야(enabled) 연결이 시작되고,
@@ -66,6 +66,10 @@ function App() {
     // 브로드캐스트로 도착한 새 메시지. WebSocket은 문자열만 오가므로
     // JSON.parse로 객체로 복원해서 목록 뒤에 이어붙인다.
     onMessage: (event) => setMessages((prev) => [...prev, JSON.parse(event.data)]),
+
+    // 3.6 — read-only 연결이 setState를 유발해 서버가 거부하면
+    // 이 콜백으로 에러가 온다 ("Connection is read-only").
+    onStateUpdateError: () => console.log("cant do that."),
 
     // 3.2에서 배운 것: onStateUpdate 콜백은 필수가 아니다 —
     // agent.state를 JSX에서 직접 읽어도 상태가 바뀌면 갱신된다.
