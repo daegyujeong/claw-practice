@@ -115,7 +115,12 @@ export class GuessGameAgent extends AIChatAgent<Env, GuessGameState> {
       messages: await convertToModelMessages(this.messages),
     });
 
-    return result.toUIMessageStreamResponse();
+    // ⚠️ sendReasoning 기본값은 true다.
+    // glm-4.7-flash 같은 thinking 모델은 "나는 캐나다인데 이름은 말하면 안 되고..." 처럼
+    // 정답이 통째로 든 사고 과정을 reasoning 파트로 흘려보낸다.
+    // 프론트에서 안 그리는 것만으로는 부족하다 — 네트워크 탭에 그대로 남는다.
+    // 그래서 아예 클라이언트로 보내지 않는다. 스트림은 텍스트 파트만 나간다.
+    return result.toUIMessageStreamResponse({ sendReasoning: false });
   }
 
   /**

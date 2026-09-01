@@ -84,14 +84,10 @@ function App() {
               {message.role === "user" ? "나" : "정체불명"}
             </span>
             <div className="bubble">
+              {/* text 파트만 그린다. reasoning은 서버에서 아예 안 보내지만(sendReasoning: false),
+                  여기서도 한 번 더 막아 둔다 — 이중 잠금. */}
               {message.parts.map((part, index) =>
-                part.type === "text" ? (
-                  <span key={index}>{part.text}</span>
-                ) : part.type === "reasoning" ? (
-                  <em key={index} className="reasoning">
-                    {part.text}
-                  </em>
-                ) : null,
+                part.type === "text" ? <span key={index}>{part.text}</span> : null,
               )}
             </div>
           </li>
