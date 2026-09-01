@@ -1,5 +1,5 @@
 /**
- * Section 4 — AIChatAgent 프론트엔드 (4.1)
+ * Section 4 — AIChatAgent 프론트엔드 (4.1 ~ 4.2)
  *
  * Section 3에서는 useAgent 하나로 상태를 구독하고, 메시지 송수신·히스토리 로딩을
  * 직접 짰다(agent.send / onMessage / loadHistory RPC). 이번에는 useAgentChat 훅이
@@ -18,8 +18,10 @@ function App() {
   // 2) 그 연결을 useAgentChat에 넘기면 채팅에 필요한 것이 한 번에 나온다.
   //    messages: 이 대화의 전체 UIMessage 배열 (새로고침해도 서버 저장분이 복원됨)
   //    sendMessage: 사용자 메시지를 보낸다 → 서버 onChatMessage 실행
+  //    clearHistory: 서버 저장 메시지 전체 삭제 (4.2). Section 3이었으면
+  //                  @callable + DELETE FROM 을 직접 짰을 일이다.
   //    (status 등 다른 값들은 뒤에서)
-  const { messages, sendMessage } = useAgentChat({ agent });
+  const { messages, sendMessage, clearHistory } = useAgentChat({ agent });
 
   /**
    * 폼 제출 → sendMessage. 비제어 폼이라 useState가 없다:
@@ -55,6 +57,8 @@ function App() {
         <input name="input" placeholder="Type a message..." />
         <button type="submit">Send</button>
       </form>
+      {/* 4.2 — 서버 저장소의 대화를 지운다. 브로드캐스트되므로 다른 탭도 함께 비워진다. */}
+      <button onClick={clearHistory}>clear convo</button>
     </div>
   );
 }
