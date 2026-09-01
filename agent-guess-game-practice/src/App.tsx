@@ -27,10 +27,19 @@ function App() {
     },
   });
 
-  const { messages, sendMessage, clearHistory } = useAgentChat({ agent });
+  // status: "ready" | "submitted" | "streaming" | "error"
+  //   submitted = 질문은 갔는데 아직 첫 글자가 안 왔다  ← "생각 중" 구간
+  //   streaming = 토큰이 흘러 들어오는 중 (이때부터는 글자 자체가 진행 표시다)
+  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+    agent,
+  });
+
+  const isThinking = status === "submitted";
+  const isBusy = status === "submitted" || status === "streaming";
 
   const handleSubmit = (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (isBusy) return; // 답이 오는 중에 또 보내지 못하게 — 질문 수가 꼬인다
     const formData = new FormData(e.currentTarget);
     const text = (formData.get("input") as string).trim();
     if (!text) return;
@@ -73,7 +82,7 @@ function App() {
       )}
 
       <ul className="messages">
-        {messages.length === 0 && (
+        {messages.length === 0 && !isBusy && (
           <li className="hint">
             예: "살아 있나요?" / "유럽에 있나요?" / "바다에 접해 있나요?"
           </li>
@@ -92,17 +101,37 @@ function App() {
             </div>
           </li>
         ))}
+
+        {/* 첫 토큰이 오기 전까지만 보이는 "생각 중" 표시.
+            streaming이 시작되면 글자가 직접 흐르므로 이 말풍선은 사라진다. */}
+        {isThinking && (
+          <li className="msg msg-assistant">
+            <span className="who">정체불명</span>
+            <div className="bubble typing" aria-label="생각 중" role="status">
+              <span className="dot" />
+              <span className="dot" />
+              <span className="dot" />
+            </div>
+          </li>
+        )}
       </ul>
 
       <form className="composer" onSubmit={handleSubmit}>
         <input
           name="input"
           autoComplete="off"
+          disabled={isBusy}
           placeholder={
-            solved ? "New game을 눌러 새 라운드를 시작하세요" : "질문을 입력하세요..."
+            solved
+              ? "New game을 눌러 새 라운드를 시작하세요"
+              : isThinking
+                ? "생각하는 중..."
+                : "질문을 입력하세요..."
           }
         />
-        <button type="submit">보내기</button>
+        <button type="submit" disabled={isBusy}>
+          보내기
+        </button>
       </form>
     </main>
   );

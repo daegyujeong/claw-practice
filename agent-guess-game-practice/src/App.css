@@ -129,12 +129,6 @@ body {
   background: #1d2430;
 }
 
-.reasoning {
-  display: block;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .composer {
   position: sticky;
   bottom: 0;
@@ -168,4 +162,57 @@ body {
   font-weight: 600;
   font-size: 15px;
   cursor: pointer;
+}
+
+/* ── "생각 중" 점 세 개 ───────────────────────────────
+   첫 토큰이 오기 전 구간(status === "submitted")에만 보인다. */
+.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 15px;
+}
+
+.typing .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: blink 1.2s infinite ease-in-out;
+}
+
+/* 점마다 시작 시각을 어긋나게 해서 물결처럼 보이게 한다 */
+.typing .dot:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.typing .dot:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+@keyframes blink {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+/* 움직임을 줄여 달라고 설정한 사용자에겐 깜빡임만 남긴다 */
+@media (prefers-reduced-motion: reduce) {
+  .typing .dot {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+.composer input:disabled,
+.composer button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
