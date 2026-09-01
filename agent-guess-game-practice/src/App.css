@@ -1,0 +1,171 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --line: #262b36;
+  --text: #e8eaf0;
+  --muted: #9aa3b2;
+  --accent: #f6821f;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Segoe UI", sans-serif;
+}
+
+.app {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 32px 20px 24px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: -0.02em;
+}
+
+.subtitle {
+  margin: 6px 0 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.scoreboard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.badge-solved {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ghost {
+  margin-left: auto;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ghost:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reveal {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: rgba(246, 130, 31, 0.08);
+  font-size: 15px;
+}
+
+.messages {
+  list-style: none;
+  padding: 0;
+  margin: 20px 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 82%;
+}
+
+.msg-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.who {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.bubble {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 13px;
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.msg-user .bubble {
+  background: #1d2430;
+}
+
+.reasoning {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+  background: var(--bg);
+}
+
+.composer input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.composer input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.composer button {
+  border: none;
+  border-radius: 10px;
+  padding: 0 18px;
+  background: var(--accent);
+  color: #1a1200;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+}

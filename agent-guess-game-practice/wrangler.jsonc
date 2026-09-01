@@ -1,0 +1,39 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-guess-game-practice",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "upload_source_maps": true,
+
+  // Workers AI 바인딩 — worker에서 this.env.AI 로 쓴다
+  "ai": {
+    "binding": "AI"
+  },
+
+  // 에이전트는 Durable Object다. 클래스 이름을 코드와 정확히 맞춰야 한다.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GuessGameAgent",
+        "class_name": "GuessGameAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GuessGameAgent"]
+    }
+  ]
+}
