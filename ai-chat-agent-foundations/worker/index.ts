@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 4 — AIChatAgent (4.0 Introduction ~ 4.6 Tool Approvals)
+ * Section 4 — AIChatAgent (4.0 Introduction ~ 4.7 Sanitize Message)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -23,6 +23,8 @@
  * - 4.6(Tool Approvals): needsApproval이 있는 툴은 사용자 승인 후에만 실행된다.
  *   + onChatMessage의 두 번째 인자 options.abortSignal을 streamText에 넘기면
  *   프론트의 stop() 버튼이 진행 중인 모델 호출을 실제로 끊는다.
+ * - 4.7(Sanitize Message): sanitizeMessageForPersistence를 오버라이드하면 메시지가
+ *   SQLite에 저장되기 직전에 내용을 바꾸거나 가릴 수 있다 (반드시 메시지를 반환).
  */
 
 // AIChatAgent: `agents`가 아니라 별도 패키지 `@cloudflare/ai-chat`에서 온다.
@@ -47,6 +49,7 @@ import {
   streamText,
   type StreamTextOnFinishCallback,
   type ToolSet,
+  type UIMessage,
 } from "ai";
 // workers-ai-provider: AI SDK가 "Cloudflare에 호스팅된 모델"을 쓰게 해주는 어댑터.
 //   AI SDK 자체는 OpenAI/Anthropic 등 어떤 공급자든 쓸 수 있고, 공급자마다
@@ -141,6 +144,41 @@ export class PotatoChatAgent extends AIChatAgent<Env> {
     //   조각마다 저장·브로드캐스트하고, 프론트 useAgentChat이 messages를 실시간으로
     //   갱신한다. 4.4부터는 툴 호출 조각도 이 스트림에 섞여 온다.
     return result.toUIMessageStreamResponse();
+  }
+
+  /**
+   * 4.7 — 저장 직전 훅. 사용자 메시지든 모델 응답이든, AIChatAgent가 SQLite에
+   * 쓰기 전에 메시지 하나씩 이 메서드를 거친다. 규칙은 하나 — **반드시 UIMessage를
+   * 반환**한다 (수정했든 안 했든). 이메일·전화번호 마스킹, 긴 툴 출력 잘라내기
+   * 같은 "저장본만 다듬기"에 쓴다. 화면에 흐르는 스트림은 그대로이고, 새로고침해서
+   * 히스토리를 다시 불러올 때 바뀐 내용이 보인다.
+   *
+   * 이름 주의: 강의 녹취는 "sanitizeMessageForPersistent"로 들리지만 실제 메서드는
+   * sanitizeMessageForPersistence 다. 또 강의에서 message.data.parts 라고 했다가
+   * 고쳤는데, UIMessage의 parts는 message.parts 다 (강사 최종 코드도 그렇다).
+   *
+   * 라이브러리는 이 훅 **앞에서** 자체 정리를 먼저 한다 — OpenAI 응답의 itemId 같은
+   * 일회성 메타데이터 제거, 공급자가 서버에서 실행한 툴의 거대한 입출력 잘라내기,
+   * 빈 reasoning 파트 삭제. 우리 훅은 그 뒤의 "사용자 정의 단계"다.
+   */
+  sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+    // 스프레드로 복사해 새 객체를 돌려준다 — 원본을 제자리에서 고치지 않는 관례.
+    return {
+      ...message,
+      // parts는 배열이므로 map으로 하나씩 검사한다. text 파트만 바꾸고 나머지
+      //   (reasoning, tool-*)는 그대로 통과시킨다.
+      parts: message.parts.map((part) => {
+        if (part.type === "text") {
+          return {
+            ...part,
+            // 데모용 치환. replace(문자열)은 **첫 번째** 일치만 바꾼다 — 전부
+            //   바꾸려면 replaceAll("food", …) 또는 정규식 /food/g 를 쓴다.
+            text: part.text.replace("food", "❌ stop eating u fat ❌"),
+          };
+        }
+        return part;
+      }),
+    };
   }
 }
 
