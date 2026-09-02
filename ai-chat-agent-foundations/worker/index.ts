@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 4 — AIChatAgent (4.0 Introduction ~ 4.5 Browser Tools)
+ * Section 4 — AIChatAgent (4.0 Introduction ~ 4.6 Tool Approvals)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -20,6 +20,9 @@
  *   툴만 부르고 답을 안 한다 — 그래서 stopWhen이 필요하다.
  * - 4.5(Browser Tools): execute가 없는 툴은 브라우저로 넘어간다. 서버는 tool call만
  *   내려보내고, 프론트 onToolCall이 실행해 addToolOutput으로 결과를 돌려준다.
+ * - 4.6(Tool Approvals): needsApproval이 있는 툴은 사용자 승인 후에만 실행된다.
+ *   + onChatMessage의 두 번째 인자 options.abortSignal을 streamText에 넘기면
+ *   프론트의 stop() 버튼이 진행 중인 모델 호출을 실제로 끊는다.
  */
 
 // AIChatAgent: `agents`가 아니라 별도 패키지 `@cloudflare/ai-chat`에서 온다.
@@ -36,7 +39,15 @@ import { routeAgentRequest } from "agents";
 // 4.2에서 쓰던 generateText import는 뺐다 — tsconfig의 noUnusedLocals 때문에
 //   안 쓰는 import가 남아 있으면 `npx tsc -b`가 실패한다(TS6133).
 //   generateText 버전의 코드는 4.2 커밋에 남아 있다.
-import { convertToModelMessages, isLoopFinished, streamText } from "ai";
+//   StreamTextOnFinishCallback / ToolSet: 4.6 — onChatMessage 시그니처를 정확히
+//   쓰기 위한 타입. import type 이므로 런타임 코드에는 남지 않는다.
+import {
+  convertToModelMessages,
+  isLoopFinished,
+  streamText,
+  type StreamTextOnFinishCallback,
+  type ToolSet,
+} from "ai";
 // workers-ai-provider: AI SDK가 "Cloudflare에 호스팅된 모델"을 쓰게 해주는 어댑터.
 //   AI SDK 자체는 OpenAI/Anthropic 등 어떤 공급자든 쓸 수 있고, 공급자마다
 //   이런 provider 패키지가 하나씩 있다.
@@ -44,7 +55,8 @@ import { createWorkersAI } from "workers-ai-provider";
 // 4.4 — 툴 정의는 별도 파일로 분리했다 (인라인으로 써도 된다).
 // 4.5 — getLocation은 execute가 없는 "브라우저 툴"이지만 등록은 똑같이 서버에서 한다.
 //   모델은 툴이 어디서 실행되는지 모른다 — 이름·설명·스키마만 본다.
-import { getLocation, getWeather } from "./tools";
+// 4.6 — getTickets(검색) + buyPlaneTicket(needsApproval 조건부 승인).
+import { buyPlaneTicket, getLocation, getTickets, getWeather } from "./tools";
 
 /**
  * 채팅 에이전트. 클래스 이름 = wrangler.jsonc의 DO 바인딩 이름
@@ -61,11 +73,22 @@ export class PotatoChatAgent extends AIChatAgent<Env> {
    * 이 시점에 방금 온 사용자 메시지는 이미 this.messages 맨 뒤에 저장돼 있고,
    * 여기서 반환한 응답은 assistant 역할로 자동 저장 + 전 클라이언트에 브로드캐스트된다.
    *
-   * 시그니처는 원래 onChatMessage(onFinish, options?)이지만 지금은 둘 다 안 쓰므로
-   * 생략했다 (options.abortSignal은 사용자가 중단 버튼을 눌렀을 때 모델 호출을
-   * 끊는 용도 — 4.6에서 쓴다).
+   * 4.6 — 시그니처를 원래 형태 onChatMessage(onFinish, options?)로 되돌렸다.
+   *   _onFinish: 스트림이 끝났을 때의 콜백. 안 쓰므로 `_` 접두어로 "의도적으로
+   *     안 씀"을 표시한다 (noUnusedParameters 경고 회피 관례).
+   *   options.abortSignal: 프론트가 stop()을 누르면 abort 되는 신호. streamText에
+   *     그대로 넘겨야 모델 호출이 실제로 중단된다 — 안 넘기면 화면만 멈추고 서버는
+   *     끝까지 토큰을 생성(= 비용)한다. 강의 메모 "abort signal 받아야 함"의 답.
+   *   options에는 requestId(이 대화 턴의 ID)와 tools(클라이언트가 동적으로 등록한
+   *     툴 스키마)도 들어 있다 — 지금은 안 쓴다.
+   *   타입: 강사는 처음 `unknown`으로 두었다가 라이브러리가 요구하는 타입
+   *     StreamTextOnFinishCallback<ToolSet>을 import해 맞췄다 — 부모 클래스의
+   *     메서드를 오버라이드할 때는 시그니처가 호환돼야 TS가 통과한다.
    */
-  async onChatMessage() {
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: { abortSignal?: AbortSignal },
+  ) {
     // 4.2 — "모델들이 사는 곳"으로의 연결. this.env.AI는 wrangler.jsonc의
     //   "ai": { "binding": "AI" } 로 만든 바인딩이다(4.0에서 추가, cf-typegen으로
     //   Env 타입 생성). KV/DO 바인딩과 달리 AI 바인딩은 로컬 dev에서도 항상
@@ -93,7 +116,13 @@ export class PotatoChatAgent extends AIChatAgent<Env> {
       tools: {
         getWeather,
         getLocation,
+        getTickets,
+        buyPlaneTicket,
       },
+      // 4.6 — 중단 신호 연결. options는 optional이므로 ?. 로 접근한다
+      //   (강사 코드는 options.abortSignal — strict 모드에서는 "possibly undefined"
+      //   에러가 날 수 있는 형태라 우리 코드는 ?. 를 붙였다).
+      abortSignal: options?.abortSignal,
       // 4.4 — 멈춤 조건. 기본값은 stepCountIs(1): "툴을 부르고 결과를 받으면
       //   1스텝 끝" → 모델이 툴만 호출하고 최종 답을 안 하는 이유가 이것이다.
       //   선택지: stepCountIs(N) — N스텝 후 정지(비용 상한, 안전),

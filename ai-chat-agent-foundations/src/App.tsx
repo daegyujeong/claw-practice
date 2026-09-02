@@ -1,5 +1,5 @@
 /**
- * Section 4 — AIChatAgent 프론트엔드 (4.1 ~ 4.5)
+ * Section 4 — AIChatAgent 프론트엔드 (4.1 ~ 4.6)
  *
  * Section 3에서는 useAgent 하나로 상태를 구독하고, 메시지 송수신·히스토리 로딩을
  * 직접 짰다(agent.send / onMessage / loadHistory RPC). 이번에는 useAgentChat 훅이
@@ -11,6 +11,8 @@
  * ④ status 표시. 데이터 흐름(useAgent → useAgentChat → parts.map)은 그대로다.
  * 4.5에서 바뀐 것: useAgentChat({ onToolCall }) — 서버에 execute가 없는 툴을
  * 브라우저가 대신 실행하고 addToolOutput으로 결과를 돌려준다.
+ * 4.6에서 바뀐 것: stop() 버튼(스트림 중단), approval-requested / output-denied
+ * 파트 렌더 + addToolApprovalResponse 로 승인·거부 회신.
  */
 
 // useAgentChat: agents/ai-react는 @cloudflare/ai-chat/react를 재export하는 경로다.
@@ -37,7 +39,18 @@ function App() {
   //    status (4.4): "submitted" | "streaming" | "ready" | "error" — 모델이 지금
   //      뭘 하는지. 화면에 그대로 찍어 보고, 나중에 로딩 UI의 재료로 쓴다.
   //      (스무고개 과제의 타이핑 인디케이터가 바로 이 값으로 만든 것.)
-  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+  //    stop (4.6): 진행 중인 응답을 끊는다. 서버 onChatMessage의 options.abortSignal과
+  //      짝이다 — 서버가 그 신호를 streamText에 안 넘기면 화면만 멈춘다.
+  //    addToolApprovalResponse (4.6): 승인 요청 파트에 대한 사용자의 결정을 서버로
+  //      보낸다 (addToolOutput의 "승인 버전"). 보내면 서버가 대화를 자동으로 이어 간다.
+  const {
+    messages,
+    sendMessage,
+    clearHistory,
+    status,
+    stop,
+    addToolApprovalResponse,
+  } = useAgentChat({
     agent,
     // 4.5 — 브라우저 툴 실행 콜백. 모델이 execute 없는 툴(getLocation)을 부르면
     //   서버는 tool call만 내려보내고, 이 콜백이 그것을 받는다.
@@ -115,6 +128,68 @@ function App() {
       //   → output-available(결과 도착) / output-error(실행 실패)
       //   툴 이름·입력·출력을 그대로 보여 주는 "디버그 카드"다.
       if (isToolUIPart(part)) {
+        // 4.6 — 승인 대기 파트. needsApproval이 true를 돌려준 툴 호출은 실행되지
+        //   않은 채 state: "approval-requested"로 내려오고, part.approval.id가
+        //   "이 승인 요청"의 ID다. "approval" in part 로 좁혀야 TS가 approval 필드를
+        //   허용한다 (state마다 파트의 모양이 다른 유니언 타입이라서).
+        if ("approval" in part && part.state === "approval-requested") {
+          return (
+            <div
+              key={i}
+              className="text-sm bg-yellow-50 border border-yellow-300 p-2 rounded my-1"
+            >
+              <div>
+                <strong>Approve {getToolName(part)}?</strong>
+              </div>
+              {/* 무엇을 승인하는지(입력)를 보여 줘야 사용자가 판단할 수 있다 */}
+              {"input" in part && part.input != null && (
+                <pre className="mt-1">
+                  {JSON.stringify(part.input, null, 2)}
+                </pre>
+              )}
+              <div className="mt-2 flex gap-2">
+                {/* approved: true → 서버가 execute 실행 후 모델 호출 재개 */}
+                <button
+                  className="px-3 py-1 bg-green-500 text-white rounded"
+                  onClick={() =>
+                    addToolApprovalResponse({
+                      id: part.approval.id,
+                      approved: true,
+                    })
+                  }
+                >
+                  Approve
+                </button>
+                {/* approved: false → execute 건너뜀, 파트는 output-denied가 된다 */}
+                <button
+                  className="px-3 py-1 bg-red-500 text-white rounded"
+                  onClick={() =>
+                    addToolApprovalResponse({
+                      id: part.approval.id,
+                      approved: false,
+                    })
+                  }
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        // 4.6 — 거부된 툴 호출. 모델도 이 사실을 전달받아 "거부됐다"고 답한다.
+        //   (사용자가 "다시 해 봐"라고 하면 새 승인 요청이 다시 뜬다.)
+        if (part.state === "output-denied") {
+          return (
+            <div
+              key={i}
+              className="text-sm bg-red-50 border border-red-300 p-2 rounded my-1"
+            >
+              <strong>{getToolName(part)}</strong> — Rejected
+            </div>
+          );
+        }
+
         return (
           <div
             key={i}
@@ -174,6 +249,13 @@ function App() {
             className="shrink-0 rounded-md px-2 py-1 text-xs text-zinc-500 transition hover:bg-zinc-100 hover:text-zinc-900"
           >
             Clear
+          </button>
+          {/* 4.6 — 응답 중단. 눌러도 서버가 abortSignal을 안 넘기면 서버는 계속 돈다. */}
+          <button
+            onClick={stop}
+            className="shrink-0 rounded-md px-2 py-1 text-xs text-red-500 transition hover:bg-red-100 hover:text-red-900"
+          >
+            Stop
           </button>
           {/* 4.4 — 모델 상태를 날것으로 표시 (submitted → streaming → ready) */}
           {status}

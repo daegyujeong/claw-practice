@@ -67,3 +67,78 @@ export const getLocation = tool({
   // 입력이 없어도 스키마는 빈 객체로 줘야 한다 (모델에게 "인자 없음"을 알리는 것).
   inputSchema: z.object({}),
 });
+
+/**
+ * 4.6 — 항공권 검색 툴. buyPlaneTicket의 "승인 조건" 데모를 위한 조연이다:
+ * 모델이 먼저 이 툴로 가격을 알아낸 뒤, 그 가격을 buyPlaneTicket의 인자로 넘긴다.
+ * (툴 결과가 다음 툴 호출의 입력이 되는 — 에이전트 루프의 전형적인 모습.)
+ * 반환값은 문자열이 아니어도 된다 — 객체 배열도 그대로 모델에게 전달된다.
+ */
+export const getTickets = tool({
+  description: "Get plane tickets to a city",
+  inputSchema: z.object({
+    from: z
+      .string()
+      .meta({ description: "The code of the departure airport (ie. ICN)" }),
+    to: z
+      .string()
+      .meta({ description: "The code of the arrival airport (ie. CNX)" }),
+  }),
+  execute: async ({ from, to }) => {
+    return [
+      {
+        flight: "KE653",
+        from,
+        to,
+        departure: "09:15",
+        arrival: "13:40",
+        price: "$342",
+      },
+      {
+        flight: "TG659",
+        from,
+        to,
+        departure: "14:30",
+        arrival: "18:55",
+        price: "$289",
+      },
+      {
+        flight: "OZ741",
+        from,
+        to,
+        departure: "23:50",
+        arrival: "04:10+1",
+        price: "$195",
+      },
+    ];
+  },
+});
+
+/**
+ * 4.6 — 승인이 필요한 툴. 핵심은 needsApproval 한 줄이다.
+ *
+ * needsApproval: true 면 항상, 함수를 주면 **모델이 채운 입력을 보고** 조건부로
+ * 사용자 승인을 요구한다. 승인 대기 중에는 execute가 실행되지 않고, 프론트에
+ * state: "approval-requested" 파트가 내려간다. 사용자가 Approve → execute 실행,
+ * Reject → state "output-denied"로 기록되고 모델은 "거부됐다"는 것을 알고 답한다.
+ * 결제·삭제·전송처럼 되돌리기 어려운 행동에 거는 안전장치다.
+ */
+export const buyPlaneTicket = tool({
+  title: "BuyPlaneTicket",
+  description: "Use this when the user asks you to buy a ticket.",
+  inputSchema: z.object({
+    ticketCode: z
+      .string()
+      .meta({ description: "The ticket code that you want to buy" }),
+    // price는 getTickets 결과("$195")를 모델이 숫자로 바꿔 넣는다 — 그래서
+    //   승인 조건을 숫자 비교로 쓸 수 있다.
+    price: z.number().meta({ description: "The price of the ticket" }),
+  }),
+  // ⚠️ execute가 반드시 값을 반환해야 한다. 강의 중 return을 빼먹자 모델이 이 툴을
+  //   "결과가 안 오는 툴 = 브라우저 툴"로 취급해 대화가 멈췄다.
+  execute: async ({ price, ticketCode }) =>
+    `Ticket #${ticketCode} bought for ${price}`,
+  // 200달러 초과만 승인 요구 — 강의는 10으로 시연했다가 최종 코드에서 200으로 바꿨다.
+  //   ($195 티켓은 그냥 사고, $289·$342 티켓은 Approve/Reject 카드가 뜬다.)
+  needsApproval: ({ price }) => price > 200,
+});
