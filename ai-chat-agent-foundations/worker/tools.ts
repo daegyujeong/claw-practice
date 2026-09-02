@@ -48,3 +48,22 @@ export const getWeather = tool({
     return `The weather in the ${city} is sunny.`;
   },
 });
+
+/**
+ * 4.5 — 브라우저에서 실행되는 툴. **execute가 없다**는 것이 전부다.
+ *
+ * execute가 없으면 모델(정확히는 AI SDK)은 "이 툴은 서버가 실행 못 하니 클라이언트에
+ * 넘긴다"고 판단해 tool call만 스트림으로 내려보내고 결과를 기다린다. 프론트의
+ * useAgentChat({ onToolCall })이 그 요청을 받아 실행하고 addToolOutput으로 결과를
+ * 돌려주면 서버가 대화를 자동으로 이어 간다. 위치·카메라·클립보드처럼 브라우저에만
+ * 있는 API를 모델이 쓰게 하는 방법이다.
+ *
+ * ⚠️ 4.6 강의 중 강사가 buyPlaneTicket의 return을 빼먹었을 때 모델이 이 툴을
+ *    "브라우저 툴"로 오해했다 — execute의 유무가 곧 실행 위치 결정이라는 뜻.
+ */
+export const getLocation = tool({
+  title: "getLocation",
+  description: "Use this to get the user location",
+  // 입력이 없어도 스키마는 빈 객체로 줘야 한다 (모델에게 "인자 없음"을 알리는 것).
+  inputSchema: z.object({}),
+});

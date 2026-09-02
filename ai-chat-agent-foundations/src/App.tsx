@@ -1,5 +1,5 @@
 /**
- * Section 4 — AIChatAgent 프론트엔드 (4.1 ~ 4.4)
+ * Section 4 — AIChatAgent 프론트엔드 (4.1 ~ 4.5)
  *
  * Section 3에서는 useAgent 하나로 상태를 구독하고, 메시지 송수신·히스토리 로딩을
  * 직접 짰다(agent.send / onMessage / loadHistory RPC). 이번에는 useAgentChat 훅이
@@ -9,6 +9,8 @@
  * 4.4에서 바뀐 것: ① Tailwind로 UI 정리(강사가 "링크의 코드를 복사하라"고 한 부분)
  * ② parts를 그리는 로직을 renderMessage 함수로 분리 ③ 툴 호출 파트(tool-*) 렌더
  * ④ status 표시. 데이터 흐름(useAgent → useAgentChat → parts.map)은 그대로다.
+ * 4.5에서 바뀐 것: useAgentChat({ onToolCall }) — 서버에 execute가 없는 툴을
+ * 브라우저가 대신 실행하고 addToolOutput으로 결과를 돌려준다.
  */
 
 // useAgentChat: agents/ai-react는 @cloudflare/ai-chat/react를 재export하는 경로다.
@@ -37,6 +39,34 @@ function App() {
   //      (스무고개 과제의 타이핑 인디케이터가 바로 이 값으로 만든 것.)
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent,
+    // 4.5 — 브라우저 툴 실행 콜백. 모델이 execute 없는 툴(getLocation)을 부르면
+    //   서버는 tool call만 내려보내고, 이 콜백이 그것을 받는다.
+    //   toolCall: { toolCallId, toolName, input } — 어떤 툴을 어떤 인자로.
+    //   addToolOutput: 실행 결과를 서버(→ 모델)에 돌려주는 함수.
+    onToolCall: async ({ toolCall, addToolOutput }) => {
+      // 브라우저 툴이 여러 개일 수 있으므로 이름으로 분기한다.
+      if (toolCall.toolName === "getLocation") {
+        // navigator.geolocation은 브라우저 표준 Web API(React·Cloudflare 무관).
+        //   오래된 API라 콜백 방식이어서 new Promise로 감싸 await 할 수 있게 했다
+        //   (resolve = 성공 콜백, reject = 실패 콜백). 사용자가 위치 권한을
+        //   거부하면 reject → 이 async 함수가 throw 되고 툴 결과는 안 돌아간다.
+        const position = await new Promise<GeolocationPosition>(
+          (resolve, reject) =>
+            navigator.geolocation.getCurrentPosition(resolve, reject),
+        );
+        // toolCallId를 같이 보내는 이유: 모델은 여러 툴을 병렬로, 같은 툴을 다른
+        //   인자로 여러 번 부를 수 있다. "어느 요청의 결과인지"를 ID로 짝지어 준다.
+        //   GeolocationPosition 객체는 그대로 직렬화되지 않아 toJSON()으로 평범한
+        //   객체(coords, timestamp)로 바꿔 보낸다.
+        addToolOutput({
+          toolCallId: toolCall.toolCallId,
+          output: position.toJSON(),
+        });
+        // 결과를 보내면 서버가 자동으로 모델 호출을 이어 간다
+        //   (useAgentChat의 autoContinueAfterToolResult 기본값 true) — 프론트가
+        //   sendMessage를 다시 부를 필요가 없다.
+      }
+    },
   });
 
   /**

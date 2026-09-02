@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * Section 4 — AIChatAgent (4.0 Introduction ~ 4.4 Tools)
+ * Section 4 — AIChatAgent (4.0 Introduction ~ 4.5 Browser Tools)
  * ============================================================
  *
  * 이 챕터의 핵심 개념:
@@ -18,6 +18,8 @@
  * - 4.4(Tools): streamText에 tools를 넘기면 모델이 필요할 때 함수를 호출한다.
  *   "툴 호출 → 결과 회신"이 한 스텝이고, stopWhen이 없으면 1스텝에서 멈춰
  *   툴만 부르고 답을 안 한다 — 그래서 stopWhen이 필요하다.
+ * - 4.5(Browser Tools): execute가 없는 툴은 브라우저로 넘어간다. 서버는 tool call만
+ *   내려보내고, 프론트 onToolCall이 실행해 addToolOutput으로 결과를 돌려준다.
  */
 
 // AIChatAgent: `agents`가 아니라 별도 패키지 `@cloudflare/ai-chat`에서 온다.
@@ -40,7 +42,9 @@ import { convertToModelMessages, isLoopFinished, streamText } from "ai";
 //   이런 provider 패키지가 하나씩 있다.
 import { createWorkersAI } from "workers-ai-provider";
 // 4.4 — 툴 정의는 별도 파일로 분리했다 (인라인으로 써도 된다).
-import { getWeather } from "./tools";
+// 4.5 — getLocation은 execute가 없는 "브라우저 툴"이지만 등록은 똑같이 서버에서 한다.
+//   모델은 툴이 어디서 실행되는지 모른다 — 이름·설명·스키마만 본다.
+import { getLocation, getWeather } from "./tools";
 
 /**
  * 채팅 에이전트. 클래스 이름 = wrangler.jsonc의 DO 바인딩 이름
@@ -88,6 +92,7 @@ export class PotatoChatAgent extends AIChatAgent<Env> {
       //   읽고 "지금 이 툴이 필요한가"를 스스로 판단한다.
       tools: {
         getWeather,
+        getLocation,
       },
       // 4.4 — 멈춤 조건. 기본값은 stepCountIs(1): "툴을 부르고 결과를 받으면
       //   1스텝 끝" → 모델이 툴만 호출하고 최종 답을 안 하는 이유가 이것이다.
