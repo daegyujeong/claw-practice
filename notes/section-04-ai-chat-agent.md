@@ -1,6 +1,6 @@
-# Section 4 — AIChatAgent (4.0 ~ 4.3)
+# Section 4 — AIChatAgent (4.0 ~ 4.7)
 
-> Nomad Coders 「Cloudflare Agents」 강의 Section 4의 학습 노트다. 4.0(셋업)부터 4.3 streamText까지 정리했다. 4.4 Tools 이후는 강의를 들으면서 이 노트에 이어 붙인다.
+> Nomad Coders 「Cloudflare Agents」 강의 Section 4의 학습 노트다. 4.0(셋업)부터 4.7 Sanitize Message까지 — 채팅 배선, 스트리밍, 툴 호출, 브라우저 툴, 승인, 저장 훅 — 을 정리했다.
 > 📘 표시가 붙은 부분은 **Cloudflare 공식 문서(developers.cloudflare.com), AI SDK 문서(ai-sdk.dev), 설치된 SDK의 타입 정의**를 참조해 강의에 없던 사실을 보강한 것이다.
 
 ---
@@ -20,10 +20,16 @@
 4.3 streamText:    generateText → streamText + toUIMessageStreamResponse 로 스트리밍
                    + 브로드캐스트·기억(전체 대화 전달)·히스토리 복원은 이미 공짜
                    + reasoning 파트 렌더 (모델의 "생각 과정")
-─── 이어서: 4.4 Tools → 4.5 Browser Tools → 4.6 Tool Approvals → 4.7 Sanitize Message
+4.4 Tools:         tool() + zod 로 getWeather 정의 → streamText({ tools })
+                   + stopWhen (기본 1스텝이라 툴만 부르고 멈추는 문제) + 툴 파트 UI + status
+4.5 Browser Tools: execute 없는 getLocation → 프론트 onToolCall 에서 실행 → addToolOutput
+4.6 Tool Approvals: needsApproval(price > 200) → approval-requested 파트
+                   + addToolApprovalResponse(approve/reject) + stop() ↔ options.abortSignal
+4.7 Sanitize:      sanitizeMessageForPersistence — 저장 직전에 메시지 다듬기
+─── 이어서: 5.x 이메일·웹훅으로 에이전트와 대화하기
 ```
 
-핵심 줄거리: **"Section 3에서 손수 만들던 채팅방(메시지 테이블, INSERT, broadcast, loadHistory)을 AIChatAgent가 전부 내장하고 있고, 우리는 `onChatMessage` 하나만 구현하면 된다. 거기에 AI SDK 함수 한 개를 넣으면 진짜 AI 챗봇이 된다."** 세 회차에 걸쳐 바뀌는 코드는 사실상 `onChatMessage` 안의 몇 줄뿐이고, 그 몇 줄의 의미(메시지 형식 변환, 스트리밍)를 이해하는 것이 이 섹션의 목표다.
+핵심 줄거리: **"Section 3에서 손수 만들던 채팅방(메시지 테이블, INSERT, broadcast, loadHistory)을 AIChatAgent가 전부 내장하고 있고, 우리는 `onChatMessage` 하나만 구현하면 된다. 거기에 AI SDK 함수 한 개를 넣으면 AI 챗봇이 되고(4.1~4.3), `tools`를 넘기면 에이전트가 된다(4.4~4.6)."** 앞 세 회차에서 바뀌는 코드는 `onChatMessage` 안의 몇 줄뿐이고, 뒤 네 회차에서도 서버에 직접 쓴 것은 툴 정의와 옵션 몇 줄이다. 툴 호출·승인·중단·저장은 라이브러리가 하고, 우리는 그 흐름(스텝, 파트 상태, 실행 위치)을 이해하는 것이 목표다.
 
 ---
 
@@ -270,67 +276,361 @@ async onChatMessage() {
 
 ---
 
-## 6. 실습 코드 뜯어보기 (`ai-chat-agent-foundations/`)
+## 6. 4.4 Tools — 모델에게 손을 달아 주기
 
-### worker/index.ts (4.3 기준)
+지금까지의 에이전트는 "말만" 한다. 툴(도구)을 주면 모델이 **필요할 때 우리 함수를 호출**한다. 강사의 표현대로 "이제야 챗봇이 아니라 에이전트"다.
+
+### 툴 호출의 원리
+
+모델은 우리 코드를 직접 실행하지 못한다. 대신 이렇게 돌아간다.
+
+```
+① 우리 → 모델: "getWeather라는 툴이 있다. 설명은 ~, 입력은 { city: string }"   (tools 옵션)
+② 모델 → 우리: "getWeather를 city=Bilbao 로 불러 달라"                          (tool call, 응답에 섞여 옴)
+③ 우리(서버): execute({ city: "Bilbao" }) 실행 → "The weather in the Bilbao is sunny."
+④ 우리 → 모델: "③의 결과다"                                                     (tool result)
+⑤ 모델 → 우리: "빌바오는 맑습니다"                                              (최종 답)
+```
+
+②~④가 **한 스텝(step)** 이고, ⑤까지 가려면 두 스텝이 필요하다. 이것이 뒤의 `stopWhen` 이야기로 이어진다.
+
+### 툴 정의 — `tool()` + zod
+
+```ts
+// worker/tools.ts
+import { tool } from "ai";
+import z from "zod";
+
+export const getWeather = tool({
+  title: "GetWeather",                              // 표시용 이름 (선택)
+  description: "Get the weather of a city",         // 모델이 "언제 쓸지" 판단하는 근거
+  inputSchema: z.object({                           // 모델이 채워야 하는 입력의 모양
+    city: z.string().meta({
+      description: "The name of the city you want to get the weather from (ie: Malaga)",
+    }),
+  }),
+  execute: ({ city }) => {                          // 모델이 호출하면 서버에서 실행
+    return `The weather in the ${city} is sunny.`;
+  },
+});
+```
+
+| 필드 | 역할 | 비고 |
+|---|---|---|
+| `description` | 모델이 이 툴을 **언제** 쓸지 판단 | 명확할수록 오호출이 준다 |
+| `inputSchema` | 모델이 **어떤 인자**로 부를지 + 런타임 검증 | zod 객체. 필드마다 `.meta({ description })` |
+| `execute` | 모델이 부르면 **서버(DO)에서** 실행 | 인자는 스키마를 통과한 값. 반환값이 모델에게 감 |
+| `title` | 사람이 읽는 이름 | 모델이 실제로 쓰는 이름은 `tools: { getWeather }`의 **키** |
+
+강사는 `onChatMessage` 안에 인라인으로 만들어도 된다고 보여 준 뒤 `tools.ts`로 분리했다 — 툴이 늘어날수록 분리가 낫다.
+
+**zod가 여기서 하는 일 세 가지** (4.5 메모 "zod의 용도?"의 답):
+
+1. **모델에게 보낼 입력 형식 설명** — zod 스키마는 JSON Schema로 변환돼 툴 설명과 함께 모델에 전달된다. 모델은 이걸 보고 `{ "city": "Bilbao" }`를 만든다.
+2. **런타임 검증** — 모델이 보낸 인자가 스키마에 안 맞으면(`city`가 없거나 숫자거나) 툴이 실행되지 않고 에러 파트가 된다. 모델 출력은 신뢰할 수 없는 입력이므로 검증이 필요하다.
+3. **TypeScript 타입 추론** — `execute: ({ city }) => …`에서 `city`가 `string`으로 자동 추론된다. 타입을 두 번 쓰지 않아도 된다.
+
+> 📘 공식 문서 보강 — `inputSchema`는 zod 전용이 아니다. Valibot, ArkType 등 Standard Schema를 따르는 라이브러리나 순수 JSON Schema(`jsonSchema()`)도 받는다. 강의가 zod를 고른 이유는 가장 널리 쓰이고 타입 추론이 좋기 때문이다. `.meta({ description })`은 **zod 4** 문법이고(설치된 것은 zod 4.x), zod 3에서는 `.describe("…")`를 쓴다 — 둘 다 모델에게 가는 설명이 된다. `execute`는 문자열뿐 아니라 객체·배열도 반환할 수 있다(4.6의 `getTickets`가 배열을 돌려준다).
+
+### 서버 — `tools`와 `stopWhen`
+
+```ts
+const result = streamText({
+  model: workersAi("@cf/zai-org/glm-4.7-flash"),
+  messages: await convertToModelMessages(this.messages),
+  tools: { getWeather },          // 키 = 모델이 부르는 툴 이름
+  stopWhen: isLoopFinished(),     // 멈춤 조건
+});
+```
+
+처음 `tools`만 넣고 "What is the weather in Bilbao?"를 보내면 모델이 reasoning → 툴 호출까지 하고 **답을 안 한 채 멈춘다.** `status`는 `ready`, 에러도 없다. 이유는 **`stopWhen`의 기본값이 `stepCountIs(1)`** — 툴을 부르고 결과를 받으면(1스텝) 거기서 끝이기 때문이다. 툴 결과를 보고 답을 만드는 두 번째 스텝이 필요하다.
+
+| `stopWhen` 값 | 의미 | 언제 |
+|---|---|---|
+| `stepCountIs(N)` | N스텝 후 정지 (강의: 50 ≈ 툴 호출 25번) | 비용 상한이 필요할 때 — 가장 안전 |
+| `hasToolCall("이름")` | 특정 툴이 불리면 정지 | "이 툴이 불리면 끝"인 흐름 |
+| `isLoopFinished()` | 모델이 스스로 끝낼 때까지 | 강사 최종 코드. 무한 루프·토큰 폭주 위험 |
+| `[a, b]` 배열 | 하나라도 만족하면 정지 | `[isLoopFinished(), stepCountIs(50)]` 같은 안전망 |
+
+강의에서 "stepCount"라고 말한 함수의 실제 이름은 **`stepCountIs`** 다(강사 4.4 코드가 `isLoopFinished()`로 끝나 우리 코드도 그걸 따랐다).
+
+> 📘 공식 문서 보강 — `stopWhen`은 **마지막 스텝에 툴 결과가 있을 때만** 평가된다. 툴을 안 부른 일반 답변은 조건과 무관하게 한 스텝에서 끝난다. 기본값이 1인 것은 `streamText`/`generateText`이고, AI SDK의 상위 추상화인 `ToolLoopAgent`는 기본값이 `stepCountIs(20)`이다. 루프가 멈추는 조건은 stopWhen 외에도 세 가지가 더 있다: 모델이 툴 호출 없이 답을 끝냈을 때, `execute`가 없는 툴이 불렸을 때(→ 4.5 브라우저 툴), 승인이 필요한 툴이 불렸을 때(→ 4.6). 스텝마다 모델·툴 목록·메시지를 바꾸는 `prepareStep` 콜백도 있다.
+
+### 프론트 — `renderMessage`, 툴 파트, `status`
+
+4.4에서 UI를 Tailwind로 갈아입혔지만(강사: "링크의 코드를 복사하라"), 구조상 바뀐 것은 세 가지다.
+
+```tsx
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
+
+function renderMessage(msg: UIMessage) {
+  return msg.parts.map((part, i) => {
+    if (part.type === "text") return <p key={i}>{part.text}</p>;
+    if (part.type === "reasoning") return <p key={i} className="italic">{part.text}</p>;
+    if (isToolUIPart(part)) {                      // "tool-getWeather" 같은 파트
+      return (
+        <div key={i}>
+          {getToolName(part)} {part.state}          // 이름 + 상태
+          {"input" in part && <pre>{JSON.stringify(part.input)}</pre>}
+          {part.state === "output-available" && <pre>{JSON.stringify(part.output)}</pre>}
+        </div>
+      );
+    }
+    return null;
+  });
+}
+```
+
+- **툴 파트의 `type`은 `"tool-getWeather"`처럼 툴마다 다르다.** 그래서 문자열 비교 대신 `isToolUIPart(part)`로 판별하고, `getToolName(part)`로 이름만 꺼낸다.
+- **파트 하나가 `state`를 바꿔 가며 갱신된다.** `input-streaming`(모델이 인자를 쓰는 중) → `input-available`(인자 확정, 실행 중) → `output-available`(결과 도착). `input`은 앞 단계에서 아직 없을 수 있어 `"input" in part`로 확인하고, `output`은 타입상 `output-available`일 때만 있다.
+- **`status`** — `useAgentChat`이 주는 `"submitted" | "streaming" | "ready" | "error"`. 지금은 헤더에 날것으로 찍지만, 로딩 스피너·전송 버튼 비활성화의 재료다(스무고개 과제의 타이핑 인디케이터가 이것).
+
+> 📘 공식 문서 보강 — 툴 파트의 `state` 전체 목록: `input-streaming` → `input-available` → (`approval-requested` → `approval-responded`) → `output-available` | `output-error` | `output-denied`. 괄호 안은 4.6 승인 흐름에서만 나온다. 툴 이름을 배포 시점에 모르는 경우(런타임에 로드되는 MCP 툴 등)는 `type: "dynamic-tool"` 파트로 오며 `isToolUIPart`가 이것도 잡는다.
+
+---
+
+## 7. 4.5 Browser Tools — 브라우저에서 실행되는 툴
+
+위치, 카메라, 클립보드, 현재 페이지 조작처럼 **브라우저에만 있는 능력**을 모델에게 주는 방법이다. 강사는 "고객지원 에이전트가 사용자 대신 페이지를 넘기고 파일을 올리는" 그림을 그렸다.
+
+### 서버 — `execute`만 빼면 된다
+
+```ts
+export const getLocation = tool({
+  title: "getLocation",
+  description: "Use this to get the user location",
+  inputSchema: z.object({}),     // 입력 없음도 빈 객체로 명시
+  // execute 없음!
+});
+```
+
+`tools: { getWeather, getLocation }`로 등록은 똑같이 서버에서 한다. **`execute`가 없다는 것 자체가 신호**다 — AI SDK는 "서버가 실행 못 하는 툴"이라 보고 tool call만 프론트로 내려보낸 뒤 결과를 기다린다. 모델은 툴이 어디서 실행되는지 모른다(이름·설명·스키마만 본다).
+
+### 프론트 — `onToolCall` + `addToolOutput`
+
+```tsx
+const { messages, sendMessage, … } = useAgentChat({
+  agent,
+  onToolCall: async ({ toolCall, addToolOutput }) => {
+    if (toolCall.toolName === "getLocation") {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, reject),
+      );
+      addToolOutput({ toolCallId: toolCall.toolCallId, output: position.toJSON() });
+    }
+  },
+});
+```
+
+네 단계로 읽는다.
+
+1. **`onToolCall`이 불린다** — 서버가 `execute` 없는 툴의 호출을 내려보낼 때. 인자로 `toolCall`(`toolCallId`, `toolName`, `input`)과 `addToolOutput` 함수가 온다. 강사는 먼저 `console.log(toolCall)`만 해서 이 모양을 보여 줬다.
+2. **이름으로 분기** — 브라우저 툴이 여러 개일 수 있으므로 `toolCall.toolName === "getLocation"`.
+3. **브라우저 API 실행** — `navigator.geolocation.getCurrentPosition(success, error)`는 오래된 콜백 방식 API라 `new Promise`로 감싸 `await` 할 수 있게 했다. `resolve`가 성공 콜백, `reject`가 실패 콜백 자리에 들어간다. **이 부분은 순수 JavaScript**(React·Cloudflare·AI SDK 무관).
+4. **`addToolOutput({ toolCallId, output })`** — 결과를 서버(→ 모델)로 돌려준다. 결과가 도착하면 서버가 **자동으로** 모델 호출을 이어 가고, 모델이 좌표를 보고 "당신의 시간대는 …"이라 답한다. `sendMessage`를 다시 부를 필요가 없다.
+
+**`toolCallId`가 왜 필요한가** — 모델은 여러 툴을 병렬로, 같은 툴을 다른 인자로 여러 번 부를 수 있다. 각 호출은 "요청 ID"를 받고, 결과를 돌려줄 때 그 ID를 붙여야 모델이 "어느 요청의 결과"인지 짝지을 수 있다. 서버 툴에서는 SDK가 알아서 하지만, 브라우저 툴은 우리가 결과를 돌려주므로 직접 붙인다.
+
+> 📘 공식 문서 보강 — `navigator.geolocation`은 **보안 컨텍스트(HTTPS 또는 localhost)** 에서만 동작하고, 사용자에게 권한 프롬프트가 뜬다. 거부하면 `reject` → `onToolCall`이 throw 되고 결과가 안 돌아가 대화가 멈추므로, 실전에서는 `try/catch`로 잡아 `addToolOutput({ …, output: { error: "denied" } })`처럼 실패도 결과로 돌려주는 편이 낫다. `GeolocationPosition`은 일반 객체가 아니라 `JSON.stringify`하면 `{}`가 되므로 `toJSON()`으로 `coords`·`timestamp`를 꺼내 보낸 것이다. 자동 재개는 `useAgentChat`의 `autoContinueAfterToolResult`(기본 `true`) 옵션이 담당하며, `false`로 두면 결과 후 직접 `sendMessage`를 불러야 한다. `useAgentChat({ tools })`로 서버가 모르는 툴을 클라이언트가 동적으로 등록하는 방식도 있지만(JSON Schema 필요), 문서는 "대부분의 앱은 서버 `tool()` + `onToolCall`"을 권한다.
+
+---
+
+## 8. 4.6 Tool Approvals — 승인 후 실행되는 툴 (+ 응답 중단)
+
+### 먼저 — Stop 버튼과 `abortSignal`
+
+ChatGPT·Claude처럼 답변 도중 멈추는 버튼. 프론트는 한 줄, 서버는 시그니처 복원이다.
+
+```tsx
+const { …, stop } = useAgentChat({ agent, … });
+<button onClick={stop}>Stop</button>
+```
+
+```ts
+async onChatMessage(
+  _onFinish: StreamTextOnFinishCallback<ToolSet>,
+  options?: { abortSignal?: AbortSignal },
+) {
+  const result = streamText({
+    …,
+    abortSignal: options?.abortSignal,   // 이걸 안 넘기면 화면만 멈춘다
+  });
+}
+```
+
+- 4.1에서 생략했던 `onChatMessage`의 인자를 되살렸다. 첫 인자 `onFinish`는 안 쓰므로 `_onFinish`(밑줄 = "의도적으로 안 씀"), 둘째 `options`에 **`abortSignal`** 이 들어 있다.
+- **`abortSignal`을 `streamText`에 넘겨야 실제로 끊긴다.** 안 넘기면 프론트는 멈춘 것처럼 보이지만 서버는 끝까지 토큰을 생성한다(= 비용). 4.6 메모 "abort signal 받아야 함"이 이 지점이다.
+- 타입: 강사는 처음 `unknown`으로 두었다가 라이브러리가 요구하는 `StreamTextOnFinishCallback<ToolSet>`을 import해 맞췄다. 부모 클래스 메서드를 오버라이드할 때는 시그니처가 호환돼야 TS가 통과한다. 강사 코드는 `options.abortSignal`인데 `options`가 optional이라 우리 코드는 `options?.abortSignal`로 썼다.
+
+> 📘 공식 문서 보강 — `AbortSignal`은 **브라우저/Web 표준**(fetch 취소에 쓰는 그것)이고 AI SDK가 같은 규격을 받는다. `options`에는 `abortSignal` 외에 `requestId`(이 턴의 ID)와 `tools`(클라이언트가 동적으로 등록한 툴 스키마)도 있다. 중단된 스트림도 그때까지의 조각은 저장되며, `streamText`의 `onAbort` 콜백으로 중단 시점을 잡을 수 있다.
+
+### 승인이 필요한 툴 — `needsApproval`
+
+```ts
+export const buyPlaneTicket = tool({
+  title: "BuyPlaneTicket",
+  description: "Use this when the user asks you to buy a ticket.",
+  inputSchema: z.object({
+    ticketCode: z.string().meta({ description: "The ticket code that you want to buy" }),
+    price: z.number().meta({ description: "The price of the ticket" }),
+  }),
+  execute: async ({ price, ticketCode }) => `Ticket #${ticketCode} bought for ${price}`,
+  needsApproval: ({ price }) => price > 200,   // ← 이 한 줄
+});
+```
+
+| `needsApproval` | 동작 |
+|---|---|
+| `true` | 항상 사용자 승인 요구 |
+| `(input) => boolean` | **모델이 채운 입력**을 보고 조건부 — 200달러 초과만 |
+| 없음 | 승인 없이 바로 실행 (4.4까지의 툴들) |
+
+시연 흐름: `getTickets`(가짜 항공권 3개, $342/$289/$195 — 결과가 **객체 배열**)로 검색 → "제일 싼 것 사 줘" → $195는 조건 미달이라 **그냥 산다** → "제일 비싼 것" → $342는 **Approve/Reject 카드**가 뜬다 → Reject하면 "거부됨", "다시 해 봐"하면 다시 카드 → Approve → 구매 완료.
+
+중간 사고: `buyPlaneTicket`의 `execute`에 `return`을 빼먹자 모델이 이 툴을 **브라우저 툴로 취급**해 대화가 멈췄다 — 4.5에서 배운 "`execute`(결과)의 유무 = 실행 위치 결정"이 그대로 적용된 것이다.
+
+### 승인 UI — `approval-requested` / `output-denied` / `addToolApprovalResponse`
+
+```tsx
+const { …, addToolApprovalResponse } = useAgentChat({ … });
+
+if (isToolUIPart(part)) {
+  if ("approval" in part && part.state === "approval-requested") {
+    return (
+      <div>
+        Approve {getToolName(part)}? <pre>{JSON.stringify(part.input)}</pre>
+        <button onClick={() => addToolApprovalResponse({ id: part.approval.id, approved: true })}>Approve</button>
+        <button onClick={() => addToolApprovalResponse({ id: part.approval.id, approved: false })}>Reject</button>
+      </div>
+    );
+  }
+  if (part.state === "output-denied") return <div>{getToolName(part)} — Rejected</div>;
+  … // 4.4의 일반 툴 카드
+}
+```
+
+- 승인이 필요한 호출은 `execute`가 실행되지 않은 채 **`state: "approval-requested"`** 파트로 내려온다. `part.approval.id`가 이 승인 요청의 ID다. `"approval" in part`로 좁혀야 TS가 `approval` 필드를 허용한다(state마다 파트 모양이 다른 유니언 타입).
+- **`addToolApprovalResponse({ id, approved })`** — 4.5의 `addToolOutput`과 같은 계열이다. 4.5는 "결과"를, 여기서는 "결정"을 서버로 돌려준다. `approved: true`면 서버가 `execute`를 실행하고 모델 호출을 재개, `false`면 파트가 **`output-denied`** 가 되고 모델은 거부됐음을 전달받아 답한다.
+- 강사 말대로 "UI는 버튼 두 개가 함수 하나를 부르는 것뿐"이다 — 승인 대기·재개·거부 전달은 전부 라이브러리가 한다.
+
+> 📘 공식 문서 보강 — 승인은 실행을 "일시정지"하는 것이 아니다. 모델 호출은 `approval-requested`에서 **한 번 끝나고**, 결정이 오면 그 결정이 메시지에 기록된 채 **새 호출**이 시작된다(AIChatAgent가 이 재호출을 같은 assistant 메시지에 이어 붙인다). 그래서 승인 대기 중에 새로고침해도 카드가 그대로 복원된다. 파트 상태 흐름은 `approval-requested` → `approval-responded` → `output-available`(승인) 또는 `output-denied`(거부). 승인 결정은 서버가 검증하므로 프론트에서 `approved: true`를 조작해도 `needsApproval` 자체를 우회할 수는 없다 — 다만 이 예제는 **누가 승인하는지**를 구분하지 않으므로(모든 탭이 같은 인스턴스), 실서비스에서는 3.5의 인증과 결합해야 한다.
+
+---
+
+## 9. 4.7 Sanitize Message — 저장 직전에 메시지 다듬기
+
+기본적으로 `sendMessage`로 보낸 메시지와 모델 응답은 **즉시 그대로** 저장된다. 저장본을 바꾸고 싶으면(이메일 마스킹, 비밀 정보 제거, 거대한 툴 출력 잘라내기) 메서드 하나를 오버라이드한다.
+
+```ts
+sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      if (part.type === "text") {
+        return { ...part, text: part.text.replace("food", "❌ stop eating u fat ❌") };
+      }
+      return part;
+    }),
+  };
+}
+```
+
+- 메시지가 SQLite에 쓰이기 **직전에** 하나씩 이 메서드를 거친다. 규칙은 하나 — **반드시 `UIMessage`를 반환**한다(수정했든 안 했든).
+- 메시지는 `parts` 배열이므로 `map`으로 돌면서 `text` 파트만 고치고 나머지(reasoning, tool-*)는 그대로 돌려준다. 스프레드(`...message`, `...part`)로 **복사본**을 만드는 것은 원본을 제자리에서 고치지 않는 JS 관례다.
+- 시연: "spicy food에 대해 알려 줘" → 화면에는 원문이 흐르지만 **새로고침**하면 히스토리에 치환된 문장이 보인다. 즉 스트림은 그대로이고 저장본만 바뀐다.
+- 이름 주의: 녹취는 "sanitizeMessageForPersistent"로 들리지만 실제 메서드는 **`sanitizeMessageForPersistence`** 다. 강의 중 `message.data.parts`라고 했다가 고친 것도 `message.parts`가 맞다.
+- `replace("food", …)`는 **첫 번째** 일치만 바꾼다. 전부 바꾸려면 `replaceAll` 또는 정규식 `/food/g`.
+
+> 📘 공식 문서 보강 — 이 훅은 라이브러리의 **자체 정리 뒤에** 실행된다. 라이브러리가 먼저 ① OpenAI Responses API가 붙이는 일회성 `itemId`·암호화된 reasoning 메타데이터 제거(저장했다 다시 보내면 OpenAI가 중복 ID로 거부하기 때문), ② 공급자가 서버에서 실행한 툴(코드 실행 등)의 200KB급 입출력 잘라내기, ③ 텍스트도 메타데이터도 없는 빈 reasoning 파트 삭제를 하고, 그다음 우리 훅을 부른다. 강의 마지막에 "Anthropic·OpenAI 공급자별 메타데이터 정리"라고 한 것이 이것이다. 저장 **개수**를 제한하려면 클래스 속성 `maxPersistedMessages = 100`처럼 두면 오래된 것부터 지워진다.
+
+---
+
+## 10. 실습 코드 뜯어보기 (`ai-chat-agent-foundations/`, 4.7 기준)
+
+### worker/tools.ts
+
+| 툴 | `execute` | `needsApproval` | 실행 위치 | 배우는 것 |
+|---|---|---|---|---|
+| `getWeather` | 있음 | 없음 | 서버 | 툴의 기본 형태, zod 스키마 |
+| `getLocation` | **없음** | 없음 | **브라우저** | `execute` 유무 = 실행 위치 |
+| `getTickets` | 있음 (배열 반환) | 없음 | 서버 | 툴 결과가 다음 툴의 입력이 됨 |
+| `buyPlaneTicket` | 있음 | `price > 200` | 서버 (승인 후) | 조건부 승인 |
+
+### worker/index.ts — 4.0~4.3 골격
 
 | 코드 | 하는 일 | 왜 이렇게 |
 |---|---|---|
 | `import { AIChatAgent } from "@cloudflare/ai-chat"` | 채팅 특화 Agent 클래스 | `agents`가 아닌 별도 패키지 (§1 📘) |
 | `import { routeAgentRequest } from "agents"` | URL → DO 라우팅 | Section 3과 동일 |
-| `import { convertToModelMessages, streamText } from "ai"` | AI SDK 함수 | 4.2의 `generateText`는 이제 안 쓰므로 뺐다 — `tsconfig`의 `noUnusedLocals` 때문에 남겨 두면 `npx tsc -b`가 TS6133으로 실패한다(강사 4.3 코드에는 남아 있다). generateText 버전은 4.2 커밋에 있다 |
 | `import { createWorkersAI } from "workers-ai-provider"` | Cloudflare 모델용 provider | AI SDK ↔ Workers AI 연결 부품 |
 | `class PotatoChatAgent extends AIChatAgent<Env>` | 에이전트 정의 | 클래스명 = DO 바인딩명 = 프론트 `agent` 이름 |
-| `async onChatMessage()` | 메시지 올 때마다 실행 | AIChatAgent의 유일한 필수 구현 |
 | `createWorkersAI({ binding: this.env.AI })` | 모델 공급자 연결 | AI 바인딩은 항상 원격·과금 (§2 📘) |
-| `streamText({ model, messages })` | 모델 호출(스트림) | await 없음 — 첫 토큰부터 흘리기 위해 |
-| `workersAi("@cf/zai-org/glm-4.7-flash")` | 모델 선택 | 자동완성 목록보다 대시보드 ID가 정확 |
+| `streamText({ model, messages, … })` | 모델 호출(스트림) | await 없음 — 첫 토큰부터 흘리기 위해 |
 | `await convertToModelMessages(this.messages)` | 저장 형식 → 모델 형식 | `id` 제거, 대화 전체 전달 = "기억" |
 | `return result.toUIMessageStreamResponse()` | 스트림 응답 | 프론트 무수정으로 스트리밍 + 파트 구분 |
-| `(await routeAgentRequest(request, env)) ?? 404` | 라우팅 + 폴백 | `routeAgentRequest`는 `Promise<Response \| null>`을 반환하므로 **await가 있어야 `??`가 의미가 있다.** 강사 코드는 await 없이 `?? 404`를 쓰는데 Promise는 절대 null이 아니라서 404 분기가 죽은 코드다 — 우리 코드(await 있음) 쪽이 정확하다 |
+| `(await routeAgentRequest(request, env)) ?? 404` | 라우팅 + 폴백 | `Promise<Response \| null>`이라 **await가 있어야 `??`가 의미 있다** (강사 코드는 await 없음 → 404 분기가 죽은 코드) |
 
-### src/App.tsx (4.3 기준)
+### worker/index.ts — 4.3 이후 추가된 줄
+
+| 코드 | 하는 일 | 왜 이렇게 |
+|---|---|---|
+| `import { …, isLoopFinished, type StreamTextOnFinishCallback, type ToolSet, type UIMessage } from "ai"` | 4.4~4.7 추가 import | `type` import는 런타임에 사라진다 |
+| `import { buyPlaneTicket, getLocation, getTickets, getWeather } from "./tools"` | 툴 4개 | 인라인 대신 분리 |
+| `async onChatMessage(_onFinish, options?)` | 시그니처 복원 | `options.abortSignal`을 받기 위해. `_` = 안 쓰는 인자 |
+| `tools: { getWeather, getLocation, getTickets, buyPlaneTicket }` | 모델에 툴 제공 | 키가 모델이 부르는 이름 |
+| `abortSignal: options?.abortSignal` | Stop 버튼 연결 | 안 넘기면 서버는 계속 생성 |
+| `stopWhen: isLoopFinished()` | 멈춤 조건 | 기본 `stepCountIs(1)`이면 툴만 부르고 끝. 실서비스는 `stepCountIs`와 배열로 |
+| `sanitizeMessageForPersistence(message)` | 저장 직전 훅 | 반드시 메시지 반환 |
+
+### src/App.tsx — 데이터 흐름
 
 ```
-useAgent({ agent: "PotatoChatAgent" })          ← WebSocket 연결 (Section 3과 동일)
-  └ useAgentChat({ agent })                     ← messages / sendMessage / clearHistory
-      ├ <ul> messages.map → <li key=id>          ← role + parts.map(text → span, reasoning → em)
-      ├ <form onSubmit>  FormData → sendMessage({ text }) → reset()
-      └ <button onClick={clearHistory}>
+useAgent({ agent: "PotatoChatAgent" })
+  └ useAgentChat({ agent, onToolCall })                 ← 4.5: 브라우저 툴 실행
+      ├ messages / sendMessage / clearHistory
+      ├ status  (4.4)   stop (4.6)   addToolApprovalResponse (4.6)
+      └ messages.map → renderMessage(message) → parts.map
+            ├ text → <p>          reasoning → <p italic>
+            └ isToolUIPart(part)
+                  ├ approval-requested → Approve / Reject 버튼 (4.6)
+                  ├ output-denied      → "Rejected" (4.6)
+                  └ 그 외 → 이름 + state + input + output 카드 (4.4)
 ```
 
 ### 강사 코드와 다른 점 (우리 프로젝트의 선택)
 
-- `vite.config.ts`에 `agents/vite` 플러그인과 `@tailwindcss/vite`가 들어 있고 `index.css`가 Tailwind 한 줄이다 — Section 3 과제·스무고개 과제에서 쓰던 설정을 이어 온 것. 강의의 이번 범위에는 데코레이터도 Tailwind도 안 나오므로 없어도 된다.
-- 위 표의 두 가지(`generateText` import 제거, `routeAgentRequest` await)와 `streamText` 앞 `await` 제거.
+- 4.3에서 안 쓰는 `generateText` import 제거(`noUnusedLocals` 때문에 남기면 `tsc -b` 실패), `streamText` 앞 `await` 제거, `routeAgentRequest`에 `await`.
+- 4.6의 `options.abortSignal` → `options?.abortSignal` (optional 인자라 strict 모드에서 안전).
+- `vite.config.ts`의 `agents/vite`·Tailwind 플러그인은 이전 과제부터 있었고, 4.4에서 강사도 같은 구성(`agents(), react(), tailwindcss(), cloudflare()`)으로 맞췄다 — 이제 차이가 아니다.
 
 ### 왜 이 코드가 학습용 예제인가 (한계)
 
-- 시스템 프롬프트가 없다 — 모델이 "나는 AI 어시스턴트"라고 답하는 이유. 성격·규칙을 주려면 `streamText({ system: "…" })`(스무고개 과제에서 한 것).
-- 에러 처리가 없다 — 모델 호출 실패가 스트림 안으로 조용히 들어간다(§5 📘).
-- 사용자 구분이 없다 — 모든 탭이 같은 인스턴스(`default`)의 같은 대화를 본다. `useAgent({ name: … })`으로 인스턴스를 나누면 사용자별 대화가 된다(Section 3의 인스턴스 개념 그대로).
-- `parts`를 두 종류만 그린다 — 4.4에서 툴 파트가 오면 화면에 아무것도 안 보이는 구간이 생긴다.
+- `getWeather`는 항상 "sunny" — 진짜 API 호출(`fetch`)로 바꾸는 순간 실제 에이전트가 된다. 다만 `execute` 안의 `fetch`도 Worker의 서브리퀘스트 한도에 든다.
+- `isLoopFinished()`만 두면 모델이 툴을 무한히 부를 수 있다. `stepCountIs`를 함께 두는 것이 안전하다.
+- 브라우저 툴의 실패(권한 거부)를 처리하지 않는다 → 대화가 멈춘다.
+- 승인자를 구분하지 않는다 — 같은 인스턴스를 보는 누구나 Approve를 누를 수 있다.
+- `sanitizeMessageForPersistence`의 치환은 데모용이다. 실전 용도는 PII 마스킹·거대 출력 절단.
 
 ---
 
-## 7. 핵심 요약
+## 11. 핵심 요약
 
-1. **AIChatAgent = Agent + 채팅 내장.** 메시지 저장·브로드캐스트·히스토리 복원·삭제가 들어 있고, 우리는 `onChatMessage` 하나만 구현한다. 결국 DO이므로 wrangler의 DO 바인딩·마이그레이션은 그대로.
-2. **프론트는 `useAgent` → `useAgentChat` 두 줄.** `messages`, `sendMessage`, `clearHistory`(+ `status` 등)가 나오고 메시지 상태를 직접 관리하지 않는다.
-3. **메시지는 `UIMessage` — `id`, `role`, `parts[]`.** 문자열이 아니라 조각 배열인 이유는 텍스트·reasoning·툴 호출 등 여러 종류가 섞이기 때문. 프론트는 `parts.map`에서 `type`별로 그린다.
-4. **AI 바인딩(`"ai": { "binding": "AI" }`)** 한 줄로 Cloudflare의 모든 모델에 접근. 로컬에서도 항상 원격 호출이며 뉴런 단위로 과금(하루 10,000 뉴런 무료). 📘
-5. **AI SDK(`ai`)는 Vercel의 범용 라이브러리**, `workers-ai-provider`가 Cloudflare 모델용 어댑터. `createWorkersAI(env.AI)` → `workersAi("모델ID")`가 `model` 자리에 들어간다.
-6. **`convertToModelMessages`** 로 저장 형식을 모델 형식으로 바꿔 대화 전체를 넘긴다 — 이것이 "기억"의 정체이고 토큰 비용의 원인이다.
-7. **`generateText`(await, 완성본) → `streamText`(await 없음, `toUIMessageStreamResponse`)** 로 바꾸면 프론트 수정 없이 스트리밍. 에러는 throw 되지 않고 스트림 안으로 들어가므로 `onError`로 잡는다. 📘
+1. **툴 = 모델이 호출을 "요청"하는 함수.** 모델은 이름·`description`·`inputSchema`만 보고 판단하고, 실행은 우리가 한다. `tool()` + zod로 정의하고 `streamText({ tools })`로 넘긴다.
+2. **zod의 세 역할** — 모델에게 보낼 입력 형식(JSON Schema로 변환), 모델 출력의 런타임 검증, `execute` 인자의 타입 추론.
+3. **스텝과 `stopWhen`.** "툴 호출 + 결과 회신"이 1스텝. 기본값 `stepCountIs(1)`이라 툴만 부르고 답을 안 한다 → `stepCountIs(N)` / `hasToolCall` / `isLoopFinished()` / 배열. `isLoopFinished()`만 두면 무한 루프 위험. 📘
+4. **`execute`가 없으면 브라우저 툴.** 서버는 tool call만 내려보내고, 프론트 `onToolCall`이 실행해 `addToolOutput({ toolCallId, output })`으로 돌려주면 서버가 자동으로 이어 간다. `toolCallId`는 병렬·중복 호출의 요청-응답을 짝짓는 ID.
+5. **`needsApproval: true | (input) => boolean`.** 승인 대기 파트는 `approval-requested`, 프론트가 `addToolApprovalResponse({ id: part.approval.id, approved })`로 결정을 보낸다. 거부는 `output-denied`. 승인은 일시정지가 아니라 "한 번 끝나고 새 호출". 📘
+6. **Stop = `stop()` + `options.abortSignal`을 `streamText`에 전달.** 안 넘기면 화면만 멈추고 서버는 계속 토큰을 만든다.
+7. **`sanitizeMessageForPersistence`** — 저장 직전 훅, 반드시 메시지 반환. 라이브러리의 자체 정리(OpenAI 메타데이터, 거대 툴 출력, 빈 reasoning) 뒤에 실행된다. 📘
+8. **파트 상태 목록**: `input-streaming` → `input-available` → (`approval-requested` → `approval-responded`) → `output-available` | `output-error` | `output-denied`. UI는 이 상태를 보고 그린다. 📘
 
 ---
 
-## 8. 다음 섹션 미리보기
+## 12. 다음 섹션 미리보기
 
-- **4.4 Tools** — 지금 모델은 말만 한다. `tool()`과 **zod**(4.0에서 설치만 해 둔 그것)로 "모델이 호출할 수 있는 함수"를 정의하면 모델이 필요할 때 도구를 쓴다. 이때 `parts`에 `tool-…` 타입 조각이 나타나고, 지금의 `text`/`reasoning`만 그리는 UI가 비어 보이기 시작한다.
-- **4.5 Browser Tools** — 도구가 브라우저(클라이언트) 쪽에서 실행되는 경우. `useAgentChat`의 `onToolCall`/`addToolOutput`.
-- **4.6 Tool Approvals** — 위험한 도구는 사용자 승인 후 실행. `needsApproval`.
-- **4.7 Sanitize Message** — 저장 전에 메시지를 다듬는 훅(Anthropic·OpenAI 공급자별 메타데이터 정리).
+- **5.x Email** — 지금은 입력창으로만 말을 건다. 에이전트에 **이메일을 보내면** 받아서 처리하고 답장까지 보내는 방법(Cloudflare Email Routing + `onEmail`). 결국 `sendMessage` 대신 다른 입구로 `this.messages`에 메시지를 넣는 것이다.
+- **Webhook** — UI 없이 **URL을 호출**해 응답을 트리거한다. 데모에서 본 "외부 이벤트로 에이전트 깨우기".
+- 이 섹션 전체를 돌아보면 `PotatoChatAgent`에 직접 쓴 메서드는 `onChatMessage`와 `sanitizeMessageForPersistence` 둘뿐이다. 툴 호출·승인·중단·저장·브로드캐스트는 전부 라이브러리가 했다 — 강사가 "코드를 거의 안 쓰고 이만큼 만들었다"고 한 이유다.
 
 ---
 
@@ -339,20 +639,33 @@ useAgent({ agent: "PotatoChatAgent" })          ← WebSocket 연결 (Section 3�
 **Q. AI는 언제 추가된 거지? 뭘 해서 바인딩된 거지?** (4.1 녹화 메모)
 A. **4.0 셋업 회차**에서 wrangler.jsonc에 `"ai": { "binding": "AI" }`를 넣고 `npm run cf-typegen`을 돌린 순간이다. 강사가 "다음 영상에서 설명하겠다"며 DO 바인딩과 함께 미리 넣어 두었기 때문에 4.1에서 갑자기 나타난 것처럼 보인다. 바인딩이 하는 일은 `Env` 객체에 `AI`라는 속성을 만들어 주는 것이고(KV 바인딩이 `env.CLAW_KV`를 만들던 것과 같은 메커니즘), 실제로 쓰는 건 4.2의 `createWorkersAI({ binding: this.env.AI })`가 처음이다. 4.1에서는 있기만 하고 안 썼다.
 
+**Q. zod의 용도?** (4.5 녹화 메모)
+A. §6의 "zod가 하는 일 세 가지" — ① 모델에게 보낼 입력 형식 설명(JSON Schema로 변환) ② 모델이 보낸 인자의 런타임 검증 ③ `execute` 인자의 TS 타입 추론. 4.0에서 설치만 해 둔 이유는 4.4의 툴이 첫 사용처였기 때문이다. zod 자체는 AI와 무관한 범용 검증 라이브러리라 폼 입력·API 응답 검증에도 널리 쓰인다. 브라우저 콘솔 실험은 안 되지만 워커에서 한 줄: `z.object({ city: z.string() }).parse({ city: 1 })` → 에러(숫자는 string이 아님).
+
+**Q. abort signal 받아야 함** (4.6 녹화 메모)
+A. §8의 Stop 부분. 두 군데를 맞춰야 한다 — ① `onChatMessage(_onFinish, options?)`로 시그니처를 되살려 `options.abortSignal`을 받고, ② 그것을 `streamText({ abortSignal })`에 넘긴다. 프론트의 `stop()`은 이 신호를 abort 시키는 것뿐이라 ②가 빠지면 서버는 끝까지 돈다. 우리 코드는 `options?.abortSignal`(optional chaining)로 썼다.
+
 **Q. `streamText`는 왜 await를 안 하나? await를 붙이면 안 되나?**
 A. `streamText`는 Promise가 아니라 `StreamTextResult` 객체를 **즉시** 돌려준다(`generateText`는 `Promise<GenerateTextResult>`). Promise가 아닌 값을 await 하면 그 값이 그대로 나오므로 붙여도 깨지지는 않지만, "여기서 기다린다"는 잘못된 인상을 준다. 스트리밍의 핵심이 "기다리지 않는 것"이므로 관례대로 뺀다.
 
 **Q. `agents/ai-react`와 `@cloudflare/ai-chat/react` 중 뭘 써야 하나?**
 A. 둘 다 같은 것이다 — 전자가 후자를 재export한다. 강의 시점 코드는 전자, 강사의 최신 템플릿은 후자. 새로 쓰는 코드는 후자를 권한다.
 
+**Q. 툴을 서버에 등록했는데 왜 브라우저에서 실행되지?**
+A. `execute`가 없기 때문이다. 등록 위치가 아니라 **`execute`의 유무**가 실행 위치를 정한다. 4.6에서 `return`을 빼먹은 `buyPlaneTicket`이 브라우저 툴처럼 굴어 대화가 멈춘 것도 같은 원리(결과가 안 돌아오니 SDK가 클라이언트 결과를 기다림).
+
 **Q. 이건 어디 문법?** (초보용 구분)
 
 | 코드 | 어디 것 |
 |---|---|
 | `new FormData(form)`, `form.reset()` | 브라우저 표준 Web API |
+| `navigator.geolocation.getCurrentPosition(ok, err)` | 브라우저 표준 Web API (보안 컨텍스트 필요) |
+| `new Promise((resolve, reject) => …)`, `position.toJSON()` | JS 기본 (콜백 → Promise 변환 관용구) |
+| `AbortSignal` | Web 표준 (fetch 취소용) — AI SDK가 같은 규격을 받음 |
+| `{ ...message, parts: … }`, `_onFinish`, `options?.x`, `replace` vs `replaceAll` | JS 기본 (스프레드, 밑줄 관례, optional chaining) |
 | `React.SyntheticEvent<HTMLFormElement>` | React 타입 |
-| `satisfies ExportedHandler<Env>` | TypeScript 문법 (`satisfies`) + Cloudflare 타입 |
-| `part.type === "text" ? … : … ? … : null` | JS 삼항 연산자 중첩 |
-| `message.parts`, `UIMessage`, `convertToModelMessages` | AI SDK(`ai`) 규격 |
-| `AIChatAgent`, `onChatMessage`, `useAgentChat`, `clearHistory` | Cloudflare `@cloudflare/ai-chat` |
+| `satisfies ExportedHandler<Env>`, `import { type X }`, `"approval" in part` | TypeScript 문법 (satisfies, type-only import, in 타입 좁히기) |
+| `z.object`, `z.string().meta()` | zod (범용 검증 라이브러리, zod 4) |
+| `tool()`, `inputSchema`, `execute`, `needsApproval`, `stopWhen`, `stepCountIs`, `isLoopFinished`, `isToolUIPart`, `getToolName`, `UIMessage` | AI SDK(`ai`) 규격 |
+| `AIChatAgent`, `onChatMessage(onFinish, options)`, `sanitizeMessageForPersistence`, `useAgentChat`, `onToolCall`, `addToolOutput`, `addToolApprovalResponse`, `stop`, `status` | Cloudflare `@cloudflare/ai-chat` (일부는 AI SDK `useChat`을 감싼 것) |
 | `this.env.AI`, `"ai": { "binding" }` | Cloudflare Workers 바인딩 |
